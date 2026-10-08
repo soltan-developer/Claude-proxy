@@ -202,8 +202,10 @@ async fn streamed_mock_provider(Json(payload): Json<Value>) -> Response {
         )
             .into_response();
     } else if requested == "finish without done" {
-        chunks.push(frame(json!({"choices":[{"delta":{"content":"partial response"},
-            "finish_reason":"stop"}]})));
+        chunks.push(frame(
+            json!({"choices":[{"delta":{"content":"partial response"},
+            "finish_reason":"stop"}]}),
+        ));
         // A provider may die after finish_reason but before its usage/[DONE].
         return (
             [(header::CONTENT_TYPE, "text/event-stream")],
@@ -211,8 +213,10 @@ async fn streamed_mock_provider(Json(payload): Json<Value>) -> Response {
         )
             .into_response();
     } else if requested == "missing output usage" {
-        chunks.push(frame(json!({"choices":[{"delta":{"content":"has no verified usage"},
-            "finish_reason":"stop"}]})));
+        chunks.push(frame(
+            json!({"choices":[{"delta":{"content":"has no verified usage"},
+            "finish_reason":"stop"}]}),
+        ));
         chunks.push("data: [DONE]\n\n".into());
         return (
             [(header::CONTENT_TYPE, "text/event-stream")],
@@ -640,7 +644,6 @@ async fn v2_output_cap_requires_strict_sse_for_streamed_requests() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-
 #[tokio::test]
 async fn v2_strict_sse_requires_terminal_done_even_after_finish_reason() {
     let (endpoint, upstream, server, dir) = start_streaming_fixture().await;
@@ -680,14 +683,16 @@ async fn v2_strict_desktop_sse_guard_passes_with_measured_usage() {
     let events = send_streaming_fixture(&endpoint, "truncated", false).await;
     assert!(!events.iter().any(|event| event["type"] == "error"));
     assert!(events.iter().any(|event| event["type"] == "message_stop"));
-    let completion = events.iter().find(|e| e["type"] == "message_delta").unwrap();
+    let completion = events
+        .iter()
+        .find(|e| e["type"] == "message_delta")
+        .unwrap();
     assert_eq!(completion["delta"]["stop_reason"], "max_tokens");
     assert_eq!(completion["usage"]["output_tokens"], 30);
     upstream.abort();
     server.abort();
     let _ = std::fs::remove_dir_all(dir);
 }
-
 
 async fn session_echo_mock(Json(payload): Json<Value>) -> Json<Value> {
     let text = payload["messages"]
@@ -715,7 +720,9 @@ async fn v2_concurrent_fresh_sessions_do_not_mix_user_messages() {
         axum::serve(
             provider,
             Router::new().route("/v1/chat/completions", post(session_echo_mock)),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
     });
     let (state, dir) = test_server_state(upstream_port, ContractMode::Enforce);
     let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -726,7 +733,9 @@ async fn v2_concurrent_fresh_sessions_do_not_mix_user_messages() {
             Router::new()
                 .route("/v1/messages", post(anthropic_messages))
                 .with_state(state),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
     });
     let client = reqwest::Client::new();
     let mut tasks = Vec::new();
@@ -739,13 +748,16 @@ async fn v2_concurrent_fresh_sessions_do_not_mix_user_messages() {
             format!("中文会话 {n}")
         };
         tasks.push(tokio::spawn(async move {
-            let response = client.post(url)
+            let response = client
+                .post(url)
                 .bearer_auth("test-gateway-token")
                 .json(&json!({
                     "model":"claude-sonnet-5-5","stream":false,"max_tokens":128,
                     "messages":[{"role":"user","content":prompt}]
                 }))
-                .send().await.unwrap();
+                .send()
+                .await
+                .unwrap();
             assert_eq!(response.status(), reqwest::StatusCode::OK);
             let value: Value = response.json().await.unwrap();
             assert_eq!(
