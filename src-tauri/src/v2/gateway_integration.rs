@@ -201,6 +201,24 @@ async fn streamed_mock_provider(Json(payload): Json<Value>) -> Response {
             chunks.join(""),
         )
             .into_response();
+    } else if requested == "finish without done" {
+        chunks.push(frame(json!({"choices":[{"delta":{"content":"partial response"},
+            "finish_reason":"stop"}]})));
+        // A provider may die after finish_reason but before its usage/[DONE].
+        return (
+            [(header::CONTENT_TYPE, "text/event-stream")],
+            chunks.join(""),
+        )
+            .into_response();
+    } else if requested == "missing output usage" {
+        chunks.push(frame(json!({"choices":[{"delta":{"content":"has no verified usage"},
+            "finish_reason":"stop"}]})));
+        chunks.push("data: [DONE]\n\n".into());
+        return (
+            [(header::CONTENT_TYPE, "text/event-stream")],
+            chunks.join(""),
+        )
+            .into_response();
     } else if requested == "over budget" {
         chunks.push(frame(
             json!({"choices":[{"delta":{"content":"text"},"finish_reason":"stop"}]}),
@@ -245,6 +263,17 @@ async fn start_streaming_fixture() -> (
     tokio::task::JoinHandle<()>,
     std::path::PathBuf,
 ) {
+    start_streaming_fixture_with_guard(false).await
+}
+
+async fn start_streaming_fixture_with_guard(
+    output_guard: bool,
+) -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    tokio::task::JoinHandle<()>,
+    std::path::PathBuf,
+) {
     let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = provider.local_addr().unwrap().port();
     let upstream = tokio::spawn(async move {
@@ -257,6 +286,7 @@ async fn start_streaming_fixture() -> (
     });
     let (mut state, dir) = test_server_state(port, ContractMode::Enforce);
     state.v2_stream_enabled = true;
+    state.v2_output_guard_enabled = output_guard;
     let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let gateway_port = gateway.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
@@ -606,6 +636,54 @@ async fn v2_output_cap_requires_strict_sse_for_streamed_requests() {
         .as_str()
         .unwrap()
         .contains("CLAUDE_PROXY_V2_STREAM"));
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+
+#[tokio::test]
+async fn v2_strict_sse_requires_terminal_done_even_after_finish_reason() {
+    let (endpoint, upstream, server, dir) = start_streaming_fixture().await;
+    let events = send_streaming_fixture(&endpoint, "finish without done", false).await;
+    assert!(events.iter().any(|event| event["type"] == "error"));
+    assert!(!events.iter().any(|event| event["type"] == "message_stop"));
+    upstream.abort();
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn v2_strict_desktop_sse_guard_fails_on_missing_measured_usage() {
+    let (endpoint, upstream, server, dir) = start_streaming_fixture_with_guard(true).await;
+    let events = send_streaming_fixture(&endpoint, "missing output usage", false).await;
+    assert!(events.iter().any(|event| event["type"] == "error"));
+    assert!(!events.iter().any(|event| event["type"] == "message_stop"));
+    upstream.abort();
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn v2_strict_desktop_sse_guard_detects_provider_overlimit() {
+    let (endpoint, upstream, server, dir) = start_streaming_fixture_with_guard(true).await;
+    let events = send_streaming_fixture(&endpoint, "over budget", false).await;
+    assert!(events.iter().any(|event| event["type"] == "error"));
+    assert!(!events.iter().any(|event| event["type"] == "message_stop"));
+    upstream.abort();
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn v2_strict_desktop_sse_guard_passes_with_measured_usage() {
+    let (endpoint, upstream, server, dir) = start_streaming_fixture_with_guard(true).await;
+    let events = send_streaming_fixture(&endpoint, "truncated", false).await;
+    assert!(!events.iter().any(|event| event["type"] == "error"));
+    assert!(events.iter().any(|event| event["type"] == "message_stop"));
+    let completion = events.iter().find(|e| e["type"] == "message_delta").unwrap();
+    assert_eq!(completion["delta"]["stop_reason"], "max_tokens");
+    assert_eq!(completion["usage"]["output_tokens"], 30);
+    upstream.abort();
     server.abort();
     let _ = std::fs::remove_dir_all(dir);
 }
