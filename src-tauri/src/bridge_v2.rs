@@ -1564,16 +1564,22 @@ fn provider_label(config: &AppConfig) -> String {
     }
 }
 
+// A local web or shell tool may take minutes to finish before a provider response
+// is available. Keep streaming clients alive during either type of tool loop.
+fn needs_stream_heartbeat(body: &[u8], config: &AppConfig) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|request| request.get("stream").and_then(Value::as_bool))
+        == Some(true)
+        && (web_tools_enabled(config) || shell_tools_enabled(config))
+}
+
 async fn anthropic_messages(
     State(state): State<ServerState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let should_keep_stream_alive = serde_json::from_slice::<Value>(&body)
-        .ok()
-        .and_then(|request| request.get("stream").and_then(Value::as_bool))
-        == Some(true)
-        && web_tools_enabled(&*state.config.read().await);
+    let should_keep_stream_alive = needs_stream_heartbeat(&body, &state.config.read().await);
     let mut processing = Box::pin(process_anthropic_messages(state, headers, body));
     if !should_keep_stream_alive {
         return processing.await;
@@ -4695,6 +4701,26 @@ fn require_ready(config: &AppConfig) -> Result<(), String> {
     Ok(())
 }
 
+// In Claude Desktop third-party mode the FIRST model is the UI default.
+// Family tier metadata allows Code/Cowork to resolve bare names (e.g. "sonnet").
+fn desktop_inference_models(config: &AppConfig) -> Vec<Value> {
+    let mut routes = normalize_routes(config.routes.clone());
+    routes.sort_by_key(|route| !route.is_default);
+    let labels = route_labels(&routes);
+    routes
+        .iter()
+        .zip(labels)
+        .map(|(route, label)| {
+            json!({
+                "name": route.route_id,
+                "labelOverride": label,
+                "anthropicFamilyTier": route.tier,
+                "isFamilyDefault": true
+            })
+        })
+        .collect()
+}
+
 fn write_desktop_profile(config: &AppConfig, token: &str) -> Result<(), String> {
     require_ready(config)?;
     let local_app_data = std::env::var_os("LOCALAPPDATA")
@@ -4715,18 +4741,7 @@ fn write_desktop_profile(config: &AppConfig, token: &str) -> Result<(), String> 
         "http://{}:{}{}",
         LOCAL_HOST, config.proxy_port, CLAUDE_DESKTOP_PREFIX
     );
-    let routes = normalize_routes(config.routes.clone());
-    let labels = route_labels(&routes);
-    let inference_models: Vec<Value> = routes
-        .iter()
-        .zip(labels)
-        .map(|(route, label)| {
-            json!({
-                "name": route.route_id,
-                "labelOverride": label
-            })
-        })
-        .collect();
+    let inference_models = desktop_inference_models(config);
     let profile = json!({
         "inferenceProvider": "gateway",
         "inferenceGatewayBaseUrl": base_url,
@@ -4886,6 +4901,16 @@ fn write_cli_settings(config: &AppConfig, token: &str) -> Result<(), String> {
         .ok_or_else(|| "The Claude Code settings path could not be found.".to_string())?;
     let path = root.join("settings.json");
     let mut settings = read_json_object(&path)?;
+    apply_cli_settings(&mut settings, config, token);
+    transactional_writes(vec![(
+        path,
+        serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?,
+    )])
+}
+
+// Keep the transformation pure so a regression test can verify the exact JSON
+// Claude Code will read without touching any user's real settings.
+fn apply_cli_settings(settings: &mut Value, config: &AppConfig, token: &str) {
     if !settings.get("env").is_some_and(Value::is_object) {
         settings["env"] = json!({});
     }
@@ -4895,12 +4920,8 @@ fn write_cli_settings(config: &AppConfig, token: &str) -> Result<(), String> {
         json!(format!("http://{}:{}", LOCAL_HOST, config.proxy_port)),
     );
     env.insert("ANTHROPIC_AUTH_TOKEN".into(), json!(token));
-    if let Some(route) = default_route(config) {
-        env.insert("ANTHROPIC_MODEL".into(), json!(route.route_id));
-    }
-    // These values are defaults for newly created CLI sessions only. A request
-    // that contains its own `model` is resolved independently below, so changing
-    // one chat's model never mutates this global default or another chat.
+    // Remove previously managed model IDs FIRST. Otherwise an explicitly
+    // chosen default is immediately erased and Claude Code falls back.
     for key in [
         "ANTHROPIC_MODEL",
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -4910,6 +4931,11 @@ fn write_cli_settings(config: &AppConfig, token: &str) -> Result<(), String> {
         "ANTHROPIC_DEFAULT_MYTHOS_MODEL",
     ] {
         env.remove(key);
+    }
+    // These values are defaults for newly created CLI sessions only. A request
+    // with an explicit model is independently routed by the proxy.
+    if let Some(route) = default_route(config) {
+        env.insert("ANTHROPIC_MODEL".into(), json!(route.route_id));
     }
     for tier in ["sonnet", "opus", "haiku", "fable"] {
         if let Some(route) = config
@@ -4927,10 +4953,6 @@ fn write_cli_settings(config: &AppConfig, token: &str) -> Result<(), String> {
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS".into(),
         json!(config.claude_code_max_output_tokens.to_string()),
     );
-    transactional_writes(vec![(
-        path,
-        serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?,
-    )])
 }
 
 fn default_route(config: &AppConfig) -> Option<&ModelRoute> {
@@ -5731,5 +5753,81 @@ mod tests {
             }] } }]
         });
         assert!(local_tool_calls(&client_tool).is_none());
+    }
+    #[test]
+    fn desktop_profile_models_use_selected_default_and_family_tiers() {
+        let mut config = AppConfig::default();
+        let mut fable = fable_route();
+        fable.is_default = false;
+        let sonnet = ModelRoute {
+            route_id: "claude-sonnet-5-5".into(),
+            display_name: "Sonnet · upstream".into(),
+            upstream_model: "example-sonnet".into(),
+            tier: "sonnet".into(),
+            context_window: 200_000,
+            max_output_tokens: 8_000,
+            is_default: true,
+        };
+        // The user's selected default is not the first stored route.
+        config.routes = vec![fable, sonnet];
+        let models = desktop_inference_models(&config);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["name"], "claude-sonnet-5-5");
+        assert_eq!(models[0]["anthropicFamilyTier"], "sonnet");
+        assert_eq!(models[0]["isFamilyDefault"], true);
+        assert_eq!(models[1]["name"], "claude-fable-5-1");
+        assert_eq!(models[1]["anthropicFamilyTier"], "fable");
+        assert_eq!(models[1]["isFamilyDefault"], true);
+    }
+
+    #[test]
+    fn claude_code_settings_keep_the_selected_default_and_preserve_unrelated_values() {
+        let mut config = AppConfig::default();
+        config.proxy_port = 19_191;
+        config.routes = vec![fable_route()];
+        let mut settings = json!({
+            "permissions": { "allow": ["Bash(git status)"] },
+            "env": {
+                "CUSTOM_USER_VALUE": "preserve-me",
+                "ANTHROPIC_MODEL": "stale-default",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "stale-opus"
+            }
+        });
+
+        apply_cli_settings(&mut settings, &config, "unit-test-gateway-token");
+
+        assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "claude-fable-5-1");
+        assert_eq!(
+            settings["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"],
+            "claude-fable-5-1"
+        );
+        assert!(settings["env"]
+            .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+            .is_none());
+        assert_eq!(
+            settings["env"]["ANTHROPIC_BASE_URL"],
+            "http://127.0.0.1:19191"
+        );
+        assert_eq!(
+            settings["env"]["ANTHROPIC_AUTH_TOKEN"],
+            "unit-test-gateway-token"
+        );
+        assert_eq!(settings["env"]["CUSTOM_USER_VALUE"], "preserve-me");
+        assert_eq!(settings["permissions"]["allow"][0], "Bash(git status)");
+    }
+
+    #[test]
+    fn shell_only_streaming_requests_get_sse_heartbeats() {
+        let mut config = AppConfig::default();
+        assert!(!needs_stream_heartbeat(br#"{"stream":true}"#, &config));
+
+        config.shell_access_mode = "auto".into();
+        assert!(needs_stream_heartbeat(br#"{"stream":true}"#, &config));
+        assert!(!needs_stream_heartbeat(br#"{"stream":false}"#, &config));
+        assert!(!needs_stream_heartbeat(b"invalid JSON", &config));
+
+        config.shell_access_mode = "disabled".into();
+        config.web_access_mode = "auto".into();
+        assert!(needs_stream_heartbeat(br#"{"stream":true}"#, &config));
     }
 }

@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -12,7 +15,7 @@ permissions:
 jobs:
   build-portable:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Check out source
@@ -33,14 +36,30 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: Run Rust unit and regression tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Type-check and build frontend
+        run: pnpm build
+
       - name: Build portable executable
+        if: github.event_name != 'pull_request'
         shell: pwsh
         run: pnpm build:portable
 
       - name: Upload portable executable
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: Claude-Proxy-Portable
