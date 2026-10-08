@@ -14,6 +14,8 @@ use std::{
 };
 
 use crate::observability::{DiagnosticEntry, ObservabilityStore, UsageAggregate, UsageQuery};
+use crate::v2::preflight::{check_chat_completions, stream_enabled, ContractMode};
+use crate::v2::stream_machine::{StreamContractError, StreamMachine};
 use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, State},
@@ -284,6 +286,8 @@ struct ServerState {
     shell_slots: Arc<Semaphore>,
     observability: ObservabilityStore,
     active_requests: Arc<AtomicUsize>,
+    v2_contract_mode: ContractMode,
+    v2_stream_enabled: bool,
 }
 
 impl ServerState {
@@ -1275,6 +1279,15 @@ async fn start_proxy_inner(state: &BridgeState) -> Result<(), String> {
             shell_slots: state.shell_slots.clone(),
             observability: state.observability.clone(),
             active_requests: state.active_requests.clone(),
+            v2_contract_mode: ContractMode::from_setting(
+                &std::env::var("CLAUDE_PROXY_V2_CONTRACTS").unwrap_or_default(),
+            ),
+            v2_stream_enabled: stream_enabled(
+                ContractMode::from_setting(
+                    &std::env::var("CLAUDE_PROXY_V2_CONTRACTS").unwrap_or_default(),
+                ),
+                &std::env::var("CLAUDE_PROXY_V2_STREAM").unwrap_or_default(),
+            ),
         })
         .layer(DefaultBodyLimit::max(25 * 1024 * 1024));
     let runtime_id = uuid::Uuid::new_v4();
@@ -1668,6 +1681,30 @@ async fn process_anthropic_messages(
             );
         }
     };
+    // OFF by default. Shadow observes request shape without storing prompts.
+    // ENFORCE rejects unsupported Anthropic blocks before legacy translation,
+    // so Code/Cowork cannot silently lose client tool or document context.
+    if let Some(assessment) = check_chat_completions(state.v2_contract_mode, &request) {
+        state.observability.log(
+            "info",
+            "v2 preflight",
+            &format!("Request {request_id}: {}", assessment.sanitized_summary(),),
+        );
+        if assessment.failed() {
+            state.observability.log(
+                "warning",
+                "v2 compatibility",
+                &format!("Request {request_id}: unsupported client content detected."),
+            );
+            if state.v2_contract_mode == ContractMode::Enforce {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "V2 compatibility check: this request contains blocks not safely supported by the Chat Completions adapter. Select an eligible native Anthropic provider or disable this experimental adapter mode.",
+                );
+            }
+        }
+    }
     let requested_model = request
         .get("model")
         .and_then(Value::as_str)
@@ -1926,6 +1963,7 @@ async fn process_anthropic_messages(
                 route.context_window,
                 route.max_output_tokens,
                 client_output_budget,
+                state.v2_stream_enabled,
             );
         }
 
@@ -3883,6 +3921,19 @@ fn stream_anthropic_message(body: &Value, trimmed_turns: usize) -> Response {
     cors_response(response)
 }
 
+fn translate_stream_chunk(
+    state: &mut AnthropicStreamState,
+    v2: &mut Option<StreamMachine>,
+    parsed: &Value,
+) -> Result<Vec<(String, Value)>, StreamContractError> {
+    let legacy = state.accept(parsed);
+    if let Some(machine) = v2.as_mut() {
+        machine.ingest(parsed)
+    } else {
+        Ok(legacy)
+    }
+}
+
 fn stream_openai_response(
     upstream: reqwest::Response,
     model: String,
@@ -3899,6 +3950,7 @@ fn stream_openai_response(
     continuation_context_window: u64,
     continuation_output_limit: u64,
     client_output_budget: Option<u64>,
+    v2_stream_enabled: bool,
 ) -> Response {
     let mut bytes = upstream.bytes_stream();
     let stream = async_stream::stream! {
@@ -3912,6 +3964,7 @@ fn stream_openai_response(
         let mut continuation_input_tokens: u64 = 0;
         let mut continuation_output_tokens: u64 = 0;
         let mut continuation_rounds = 0usize;
+        let mut v2_machine = v2_stream_enabled.then(StreamMachine::default);
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
         yield Ok::<Bytes, io::Error>(Bytes::from(encode_sse("message_start", json!({ "type": "message_start", "message": { "id": message_id, "type": "message", "role": "assistant", "model": model.clone(), "content": [], "stop_reason": null, "stop_sequence": null, "usage": { "input_tokens": input_tokens, "output_tokens": 0 } } }))));
         let mut buffer: Vec<u8> = Vec::new();
@@ -3946,16 +3999,33 @@ fn stream_openai_response(
                 let data = event.lines().filter_map(|line| line.strip_prefix("data:")).map(str::trim_start).collect::<Vec<_>>().join("\n");
                 if data.is_empty() { continue; }
                 if data == "[DONE]" { done = true; break; }
-                let Ok(parsed) = serde_json::from_str::<Value>(&data) else { continue; };
+                let Ok(parsed) = serde_json::from_str::<Value>(&data) else {
+                    if v2_stream_enabled {
+                        stream_failed = true;
+                        observability.log("error", "v2 stream", "Invalid JSON in provider SSE event.");
+                        yield Ok(Bytes::from(encode_sse("error", json!({ "type": "error", "error": { "type": "api_error", "message": "Invalid JSON in upstream SSE event." } }))));
+                        break;
+                    }
+                    continue;
+                };
                 if parsed.get("error").is_some() {
                     stream_failed = true;
                     observability.log("error", "provider stream", "The provider returned an error during a streamed response.");
                     yield Ok(Bytes::from(encode_sse("error", json!({ "type": "error", "error": { "type": "api_error", "message": "The provider returned an error during the streamed response. See Diagnostics for details." } }))));
                     break;
                 }
-                let events = state.accept(&parsed);
-                for (event_name, event_data) in events {
-                    yield Ok(Bytes::from(encode_sse(&event_name, event_data)));
+                match translate_stream_chunk(&mut state, &mut v2_machine, &parsed) {
+                    Ok(events) => {
+                        for (event_name, event_data) in events {
+                            yield Ok(Bytes::from(encode_sse(&event_name, event_data)));
+                        }
+                    }
+                    Err(error) => {
+                        stream_failed = true;
+                        observability.log("error", "v2 stream", &format!("Rejected invalid provider SSE sequence: {error:?}"));
+                        yield Ok(Bytes::from(encode_sse("error", json!({ "type": "error", "error": { "type": "api_error", "message": "Invalid streamed tool-call metadata. No tool was executed." } }))));
+                        break;
+                    }
                 }
             }
             if done || stream_failed { break; }
@@ -3971,7 +4041,19 @@ fn stream_openai_response(
                         yield Ok(Bytes::from(encode_sse("error", json!({ "type": "error", "error": { "type": "api_error", "message": "The provider returned an error during the streamed response. See Diagnostics for details." } }))));
                         break;
                     }
-                    for (event_name, event_data) in state.accept(&parsed) { yield Ok(Bytes::from(encode_sse(&event_name, event_data))); }
+                    match translate_stream_chunk(&mut state, &mut v2_machine, &parsed) {
+                        Ok(events) => {
+                            for (event_name, event_data) in events {
+                                yield Ok(Bytes::from(encode_sse(&event_name, event_data)));
+                            }
+                        }
+                        Err(error) => {
+                            stream_failed = true;
+                            observability.log("error", "v2 stream", &format!("Rejected invalid final SSE sequence: {error:?}"));
+                            yield Ok(Bytes::from(encode_sse("error", json!({ "type": "error", "error": { "type": "api_error", "message": "Incomplete or invalid streamed tool call." } }))));
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -3982,6 +4064,7 @@ fn stream_openai_response(
             stream_failed = true;
         }
         if !stream_failed
+            && !v2_stream_enabled
             && state.stop_reason.as_deref() == Some("length")
             && state.tools.is_empty()
             && continuation_safe(&state.text_content)
@@ -4135,7 +4218,32 @@ fn stream_openai_response(
             }
         }
         if !stream_failed && completed {
-            for (event_name, event_data) in state.finish() { yield Ok(Bytes::from(encode_sse(&event_name, event_data))); }
+            if let Some(machine) = v2_machine.take() {
+                let measured = (!state.output_estimated).then_some(state.output_tokens);
+                let fallback = if state.output_estimated {
+                    estimate_tokens_from_counts(state.output_ascii_chars, state.output_non_ascii_chars)
+                } else {
+                    state.output_tokens
+                };
+                match machine.finish(measured, fallback, client_output_budget) {
+                    Ok(events) => {
+                        for (event_name, event_data) in events {
+                            yield Ok(Bytes::from(encode_sse(&event_name, event_data)));
+                        }
+                    }
+                    Err(error) => {
+                        stream_failed = true;
+                        observability.log("error", "v2 stream", &format!("Provider SSE completion failed validation: {error:?}"));
+                        yield Ok(Bytes::from(encode_sse("error", json!({ "type": "error", "error": { "type": "api_error", "message": "The provider stream ended with incomplete tool calls or exceeded the client's output limit." } }))));
+                    }
+                }
+            } else {
+                for (event_name, event_data) in state.finish() {
+                    yield Ok(Bytes::from(encode_sse(&event_name, event_data)));
+                }
+            }
+        }
+        if !stream_failed && completed {
             let output_tokens = if state.output_estimated {
                 estimate_tokens_from_counts(state.output_ascii_chars, state.output_non_ascii_chars)
             } else {
@@ -5733,3 +5841,7 @@ mod tests {
         assert!(local_tool_calls(&client_tool).is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "v2/gateway_integration.rs"]
+mod v2_gateway_integration;
