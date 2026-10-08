@@ -6,6 +6,12 @@ on:
       - 'src-tauri/src/v2/**'
       - 'src-tauri/src/lib.rs'
       - 'src-tauri/src/bridge_v2.rs'
+      - 'src-tauri/src/observability.rs'
+      - 'src/UsagePage.tsx'
+      - 'src/types.ts'
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
       - '.github/workflows/verify-v2.yml'
   workflow_dispatch:
 
@@ -29,3 +35,18 @@ jobs:
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - name: Run all Rust tests, including v2 contracts
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+  v2-frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install frontend dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Typecheck and build frontend
+        run: npm run build
