@@ -190,7 +190,9 @@ async fn streamed_mock_provider(Json(payload): Json<Value>) -> Response {
             json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
         ));
     } else if requested == "disconnect" {
-        chunks.push(frame(json!({"choices":[{"delta":{"content":"partial only"}}]})));
+        chunks.push(frame(
+            json!({"choices":[{"delta":{"content":"partial only"}}]}),
+        ));
         // Deliberately close upstream without finish_reason or [DONE].
         return (
             [(header::CONTENT_TYPE, "text/event-stream")],
