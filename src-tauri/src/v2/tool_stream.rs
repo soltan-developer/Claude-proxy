@@ -2,7 +2,7 @@
 //! Some providers send tool metadata in later chunks. Never invent a tool
 //! name/id or execute a call before a complete validated representation exists.
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CompletedToolCall {
@@ -15,6 +15,7 @@ pub(crate) struct CompletedToolCall {
 pub(crate) enum ToolStreamError {
     InvalidIndex,
     ConflictingId,
+    DuplicateId,
     MissingId,
     MissingName,
     InvalidJsonArguments,
@@ -59,7 +60,7 @@ impl ToolCallAccumulator {
                 }
             }
             if let Some(fragment) = call.pointer("/function/name").and_then(Value::as_str) {
-                if !fragment.is_empty() && pending.name != fragment {
+                if !fragment.is_empty() {
                     pending.name.push_str(fragment);
                 }
             }
@@ -71,10 +72,14 @@ impl ToolCallAccumulator {
     }
 
     pub(crate) fn complete(self) -> Result<Vec<CompletedToolCall>, ToolStreamError> {
+        let mut seen_ids = HashSet::new();
         self.tools
             .into_values()
             .map(|pending| {
                 let id = pending.id.ok_or(ToolStreamError::MissingId)?;
+                if !seen_ids.insert(id.clone()) {
+                    return Err(ToolStreamError::DuplicateId);
+                }
                 if pending.name.is_empty() {
                     return Err(ToolStreamError::MissingName);
                 }
@@ -151,4 +156,26 @@ mod tests {
             .unwrap();
         assert_eq!(acc.complete(), Err(ToolStreamError::InvalidJsonArguments));
     }
+    #[test]
+    fn repeated_name_fragments_are_not_deduplicated() {
+        let mut acc = ToolCallAccumulator::default();
+        acc.push_chunk(&json!({"choices":[{"delta":{"tool_calls":[
+            {"index":0,"id":"x","function":{"name":"read","arguments":"{}"}}
+        ]}}]})).unwrap();
+        acc.push_chunk(&json!({"choices":[{"delta":{"tool_calls":[
+            {"index":0,"function":{"name":"read"}}
+        ]}}]})).unwrap();
+        assert_eq!(acc.complete().unwrap()[0].name, "readread");
+    }
+
+    #[test]
+    fn duplicate_tool_ids_in_parallel_calls_fail_closed() {
+        let mut acc = ToolCallAccumulator::default();
+        acc.push_chunk(&json!({"choices":[{"delta":{"tool_calls":[
+            {"index":0,"id":"duplicate","function":{"name":"Read","arguments":"{}"}},
+            {"index":1,"id":"duplicate","function":{"name":"Write","arguments":"{}"}}
+        ]}}]})).unwrap();
+        assert_eq!(acc.complete(), Err(ToolStreamError::DuplicateId));
+    }
+
 }
