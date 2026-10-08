@@ -40,7 +40,8 @@ impl UsageBreakdown {
             if read.is_none() && write.is_none() {
                 return None;
             }
-            total.checked_sub(read.unwrap_or(0))?
+            total
+                .checked_sub(read.unwrap_or(0))?
                 .checked_sub(write.unwrap_or(0))
         });
         Self {
@@ -61,9 +62,11 @@ impl UsageBreakdown {
     /// It does not share Anthropic's additive input token semantics.
     pub(crate) fn openai_responses(value: &Value) -> Self {
         let total = value.get("input_tokens").and_then(Value::as_u64);
-        let read = value.pointer("/input_tokens_details/cached_tokens")
+        let read = value
+            .pointer("/input_tokens_details/cached_tokens")
             .and_then(Value::as_u64);
-        let write = value.pointer("/input_tokens_details/cache_write_tokens")
+        let write = value
+            .pointer("/input_tokens_details/cache_write_tokens")
             .and_then(Value::as_u64);
         let uncached = total.and_then(|n| {
             if read.is_none() && write.is_none() {
