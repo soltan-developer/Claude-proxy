@@ -1579,7 +1579,7 @@ async fn anthropic_messages(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let should_keep_stream_alive = needs_stream_heartbeat(&body, &state.config.read().await);
+    let should_keep_stream_alive = needs_stream_heartbeat(&body, &*state.config.read().await);
     let mut processing = Box::pin(process_anthropic_messages(state, headers, body));
     if !should_keep_stream_alive {
         return processing.await;
