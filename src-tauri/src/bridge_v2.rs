@@ -1704,7 +1704,10 @@ async fn process_anthropic_messages(
         state.observability.log(
             "info",
             "v2 context shape",
-            &format!("Request {request_id}: {}", context_shape.sanitized_summary()),
+            &format!(
+                "Request {request_id}: {}",
+                context_shape.sanitized_summary()
+            ),
         );
         if assessment.failed() {
             state.observability.log(
