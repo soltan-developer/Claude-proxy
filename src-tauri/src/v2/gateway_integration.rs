@@ -687,3 +687,77 @@ async fn v2_strict_desktop_sse_guard_passes_with_measured_usage() {
     server.abort();
     let _ = std::fs::remove_dir_all(dir);
 }
+
+
+async fn session_echo_mock(Json(payload): Json<Value>) -> Json<Value> {
+    let text = payload["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .rev()
+        .find(|item| item["role"] == "user")
+        .and_then(|item| item["content"].as_str())
+        .expect("user text");
+    Json(json!({
+        "id": "provider-echo",
+        "choices": [{"finish_reason":"stop","message":{
+            "role":"assistant","content":format!("Response for {text}")
+        }}],
+        "usage": {"prompt_tokens":40,"completion_tokens":8}
+    }))
+}
+
+#[tokio::test]
+async fn v2_concurrent_fresh_sessions_do_not_mix_user_messages() {
+    let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = provider.local_addr().unwrap().port();
+    let upstream = tokio::spawn(async move {
+        axum::serve(
+            provider,
+            Router::new().route("/v1/chat/completions", post(session_echo_mock)),
+        ).await.unwrap();
+    });
+    let (state, dir) = test_server_state(upstream_port, ContractMode::Enforce);
+    let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = gateway.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            gateway,
+            Router::new()
+                .route("/v1/messages", post(anthropic_messages))
+                .with_state(state),
+        ).await.unwrap();
+    });
+    let client = reqwest::Client::new();
+    let mut tasks = Vec::new();
+    for n in 0..12 {
+        let client = client.clone();
+        let url = format!("http://127.0.0.1:{port}/v1/messages");
+        let prompt = if n % 2 == 0 {
+            format!("جلسه فارسی {n}")
+        } else {
+            format!("中文会话 {n}")
+        };
+        tasks.push(tokio::spawn(async move {
+            let response = client.post(url)
+                .bearer_auth("test-gateway-token")
+                .json(&json!({
+                    "model":"claude-sonnet-5-5","stream":false,"max_tokens":128,
+                    "messages":[{"role":"user","content":prompt}]
+                }))
+                .send().await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let value: Value = response.json().await.unwrap();
+            assert_eq!(
+                value["content"][0]["text"],
+                format!("Response for {prompt}")
+            );
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+    upstream.abort();
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
