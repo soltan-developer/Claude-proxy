@@ -35,9 +35,13 @@ impl UsageBreakdown {
             .or_else(|| value.pointer("/input_tokens_details/cache_write_tokens"))
             .and_then(Value::as_u64);
         let uncached = prompt.and_then(|total| {
-            let read = read.unwrap_or(0);
-            let write = write.unwrap_or(0);
-            total.checked_sub(read)?.checked_sub(write)
+            // Missing cache breakdown is UNKNOWN; it is not proof of
+            // zero cached tokens. Keep uncached=None in that case.
+            if read.is_none() && write.is_none() {
+                return None;
+            }
+            total.checked_sub(read.unwrap_or(0))?
+                .checked_sub(write.unwrap_or(0))
         });
         Self {
             total_input_tokens: prompt,
@@ -46,6 +50,35 @@ impl UsageBreakdown {
             cache_write_input_tokens: write,
             output_tokens: value.get("completion_tokens").and_then(Value::as_u64),
             provenance: if prompt.is_some() {
+                UsageProvenance::Provider
+            } else {
+                UsageProvenance::Unreported
+            },
+        }
+    }
+
+    /// OpenAI Responses API reports cached reads *inside* input_tokens.
+    /// It does not share Anthropic's additive input token semantics.
+    pub(crate) fn openai_responses(value: &Value) -> Self {
+        let total = value.get("input_tokens").and_then(Value::as_u64);
+        let read = value.pointer("/input_tokens_details/cached_tokens")
+            .and_then(Value::as_u64);
+        let write = value.pointer("/input_tokens_details/cache_write_tokens")
+            .and_then(Value::as_u64);
+        let uncached = total.and_then(|n| {
+            if read.is_none() && write.is_none() {
+                return None;
+            }
+            n.checked_sub(read.unwrap_or(0))?
+                .checked_sub(write.unwrap_or(0))
+        });
+        Self {
+            total_input_tokens: total,
+            uncached_input_tokens: uncached,
+            cache_read_input_tokens: read,
+            cache_write_input_tokens: write,
+            output_tokens: value.get("output_tokens").and_then(Value::as_u64),
+            provenance: if total.is_some() {
                 UsageProvenance::Provider
             } else {
                 UsageProvenance::Unreported
@@ -111,6 +144,47 @@ mod tests {
         assert_eq!(u.cache_read_input_tokens, None);
         assert_eq!(u.total_input_tokens, None);
     }
+    #[test]
+    fn absent_cache_metadata_is_unknown_not_a_reported_zero() {
+        let report = UsageBreakdown::openai(&json!({
+            "prompt_tokens":2200, "completion_tokens":150
+        }));
+        assert_eq!(report.total_input_tokens, Some(2200));
+        assert_eq!(report.uncached_input_tokens, None);
+        assert_eq!(report.cache_read_input_tokens, None);
+        assert_eq!(report.cache_write_input_tokens, None);
+    }
+
+    #[test]
+    fn a_real_reported_zero_cache_read_is_distinct_from_missing_data() {
+        let report = UsageBreakdown::openai(&json!({
+            "prompt_tokens":2200, "prompt_tokens_details":{"cached_tokens":0}
+        }));
+        assert_eq!(report.cache_read_input_tokens, Some(0));
+        assert_eq!(report.uncached_input_tokens, Some(2200));
+    }
+
+    #[test]
+    fn responses_api_cache_reads_are_a_subset_of_input() {
+        let report = UsageBreakdown::openai_responses(&json!({
+            "input_tokens":1000,"output_tokens":80,
+            "input_tokens_details":{"cached_tokens":800}
+        }));
+        assert_eq!(report.total_input_tokens, Some(1000));
+        assert_eq!(report.cache_read_input_tokens, Some(800));
+        assert_eq!(report.uncached_input_tokens, Some(200));
+        assert_eq!(report.output_tokens, Some(80));
+    }
+
+    #[test]
+    fn responses_without_cache_metadata_do_not_claim_a_cache_miss() {
+        let report = UsageBreakdown::openai_responses(&json!({
+            "input_tokens":1000,"output_tokens":80
+        }));
+        assert_eq!(report.uncached_input_tokens, None);
+        assert_eq!(report.cache_read_input_tokens, None);
+    }
+
     #[test]
     fn invalid_openai_cached_overflow_is_not_misreported_as_uncached() {
         let u = UsageBreakdown::openai(&json!({
