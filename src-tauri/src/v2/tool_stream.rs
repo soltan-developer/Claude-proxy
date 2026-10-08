@@ -161,10 +161,12 @@ mod tests {
         let mut acc = ToolCallAccumulator::default();
         acc.push_chunk(&json!({"choices":[{"delta":{"tool_calls":[
             {"index":0,"id":"x","function":{"name":"read","arguments":"{}"}}
-        ]}}]})).unwrap();
+        ]}}]}))
+        .unwrap();
         acc.push_chunk(&json!({"choices":[{"delta":{"tool_calls":[
             {"index":0,"function":{"name":"read"}}
-        ]}}]})).unwrap();
+        ]}}]}))
+        .unwrap();
         assert_eq!(acc.complete().unwrap()[0].name, "readread");
     }
 
@@ -174,8 +176,8 @@ mod tests {
         acc.push_chunk(&json!({"choices":[{"delta":{"tool_calls":[
             {"index":0,"id":"duplicate","function":{"name":"Read","arguments":"{}"}},
             {"index":1,"id":"duplicate","function":{"name":"Write","arguments":"{}"}}
-        ]}}]})).unwrap();
+        ]}}]}))
+        .unwrap();
         assert_eq!(acc.complete(), Err(ToolStreamError::DuplicateId));
     }
-
 }

@@ -63,10 +63,7 @@ fn check_tool_result(value: &Value, location: &str) -> Result<(), ContractError>
 /// Assert that a request is representable by the selected upstream adapter.
 /// Native requests preserve the complete raw request, even for future block
 /// types; Chat Completions must reject blocks it cannot represent losslessly.
-pub(crate) fn validate_request(
-    request: &Value,
-    adapter: AdapterKind,
-) -> Result<(), ContractError> {
+pub(crate) fn validate_request(request: &Value, adapter: AdapterKind) -> Result<(), ContractError> {
     if !nonempty_string(request.get("model")) {
         return Err(ContractError::MissingModel);
     }
@@ -191,15 +188,18 @@ mod tests {
     #[test]
     fn chat_adapter_accepts_complete_client_tool_round_trip() {
         let request = json!({"model":"claude-sonnet-5-5",
-          "tools":[{"name":"Read","input_schema":{"type":"object"}}],
-          "messages":[
-            {"role":"user","content":"inspect repository"},
-            {"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"Read",
-                         "input":{"path":"README.md"}}]},
-            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1",
-                        "content":[{"type":"text","text":"repo readme"}]}]}
-          ]});
-        assert_eq!(validate_request(&request, AdapterKind::ChatCompletions), Ok(()));
+        "tools":[{"name":"Read","input_schema":{"type":"object"}}],
+        "messages":[
+          {"role":"user","content":"inspect repository"},
+          {"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"Read",
+                       "input":{"path":"README.md"}}]},
+          {"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1",
+                      "content":[{"type":"text","text":"repo readme"}]}]}
+        ]});
+        assert_eq!(
+            validate_request(&request, AdapterKind::ChatCompletions),
+            Ok(())
+        );
     }
 
     #[test]
@@ -235,8 +235,14 @@ mod tests {
             {"role":"user","content":"سلام"}]});
         let snapshot = persian.clone();
         for _ in 0..10 {
-            assert_eq!(validate_request(&chinese, AdapterKind::ChatCompletions), Ok(()));
-            assert_eq!(validate_request(&persian, AdapterKind::ChatCompletions), Ok(()));
+            assert_eq!(
+                validate_request(&chinese, AdapterKind::ChatCompletions),
+                Ok(())
+            );
+            assert_eq!(
+                validate_request(&persian, AdapterKind::ChatCompletions),
+                Ok(())
+            );
         }
         assert_eq!(persian, snapshot);
         assert_ne!(persian, chinese);
