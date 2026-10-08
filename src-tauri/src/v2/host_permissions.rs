@@ -129,6 +129,27 @@ impl HostPermissionGate {
         if !directory.starts_with(&self.workspace_root) {
             return Err(PermissionError::OutOfScope);
         }
+        if matches!(intent.action, HostAction::ReadWorkspace | HostAction::WriteWorkspace) {
+            let name = Path::new(&intent.target);
+            let full = if name.is_absolute() {
+                name.to_path_buf()
+            } else {
+                directory.join(name)
+            };
+            // Reads must exist. For a new write, the existing parent must be
+            // inside the workspace; for an existing write, resolve symlinks.
+            let resolved = if full.exists() || intent.action == HostAction::ReadWorkspace {
+                full.canonicalize().map_err(|_| PermissionError::OutOfScope)?
+            } else {
+                full.parent()
+                    .ok_or(PermissionError::OutOfScope)?
+                    .canonicalize()
+                    .map_err(|_| PermissionError::OutOfScope)?
+            };
+            if !resolved.starts_with(&self.workspace_root) {
+                return Err(PermissionError::OutOfScope);
+            }
+        }
         if intent.action == HostAction::ExecuteShell && !self.enable_shell {
             return Err(PermissionError::Disabled);
         }
@@ -196,6 +217,29 @@ mod tests {
         let intent = request(&root, HostAction::ExecuteShell);
         let id = gate.propose(intent).unwrap();
         assert_eq!(gate.approve_from_host_ui(&id), Err(PermissionError::Expired));
+    }
+
+    #[test]
+    fn workspace_read_cannot_escape_via_absolute_path() {
+        let root = std::env::temp_dir();
+        let parent = root.parent().unwrap().to_path_buf();
+        let mut gate = HostPermissionGate::new(
+            root.clone(), Duration::from_secs(60), false, false,
+        ).unwrap();
+        let mut intent = request(&root, HostAction::ReadWorkspace);
+        intent.target = parent.to_string_lossy().to_string();
+        assert_eq!(gate.propose(intent), Err(PermissionError::OutOfScope));
+    }
+
+    #[test]
+    fn writing_through_parent_directory_escape_is_denied() {
+        let root = std::env::temp_dir();
+        let mut gate = HostPermissionGate::new(
+            root.clone(), Duration::from_secs(60), false, false,
+        ).unwrap();
+        let mut intent = request(&root, HostAction::WriteWorkspace);
+        intent.target = "../outside-test-file.txt".into();
+        assert_eq!(gate.propose(intent), Err(PermissionError::OutOfScope));
     }
 
     #[test]
