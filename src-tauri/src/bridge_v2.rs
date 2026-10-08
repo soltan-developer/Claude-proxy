@@ -4184,7 +4184,15 @@ fn stream_openai_response(
                 }
             }
         }
-        let completed = done || state.stop_reason.is_some();
+        // In strict V2 mode, a provider finish_reason without the terminal
+        // [DONE] is not proof that the SSE transport completed. An upstream
+        // connection can close after a finish marker but before usage/error
+        // frames. Legacy adapters retain their previous permissive behavior.
+        let completed = if v2_stream_enabled {
+            done
+        } else {
+            done || state.stop_reason.is_some()
+        };
         if !stream_failed && !completed {
             observability.log("error", "provider stream", "The provider stream ended before a completion marker was received.");
             yield Ok(Bytes::from(encode_sse("error", json!({ "type": "error", "error": { "type": "api_error", "message": "The provider stream ended before the response completed. Retry the request." } }))));
