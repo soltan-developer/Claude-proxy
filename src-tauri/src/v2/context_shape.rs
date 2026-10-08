@@ -18,6 +18,20 @@ fn size(value: &Value) -> usize {
 }
 
 impl ContextShape {
+    /// Safe for normal logs: only metadata, no prompt, tool input, or API keys.
+    pub(crate) fn sanitized_summary(&self) -> String {
+        format!(
+            "request_bytes={} system_bytes={} tool_schema_bytes={} history_bytes={} latest_message_bytes={} messages={} tools={}",
+            self.request_bytes,
+            self.system_bytes,
+            self.tools_bytes,
+            self.prior_messages_bytes,
+            self.latest_message_bytes,
+            self.messages_count,
+            self.tools_count
+        )
+    }
+
     pub(crate) fn inspect(value: &Value) -> Self {
         let messages = value.get("messages").and_then(Value::as_array);
         let tools = value.get("tools").and_then(Value::as_array);
@@ -67,6 +81,10 @@ mod tests {
         assert!(shape.system_bytes > 0);
         assert!(shape.tools_bytes > 0);
         let output = serde_json::to_string(&shape).unwrap();
+        let log_line = shape.sanitized_summary();
+        assert!(log_line.contains("history_bytes="));
+        assert!(!log_line.contains("system policy"));
+        assert!(!log_line.contains("read a local file"));
         assert!(!output.contains("system policy"));
         assert!(!output.contains("read a local file"));
         assert!(!output.contains("first"));

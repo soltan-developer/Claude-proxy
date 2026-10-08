@@ -15,6 +15,7 @@ use std::{
 
 use crate::observability::{DiagnosticEntry, ObservabilityStore, UsageAggregate, UsageQuery};
 use crate::v2::capabilities::{CapabilityMode, CapabilitySettings};
+use crate::v2::context_shape::ContextShape;
 use crate::v2::preflight::{check_chat_completions, stream_enabled, ContractMode};
 use crate::v2::provider_response::validate_completion;
 use crate::v2::stream_machine::{StreamContractError, StreamMachine};
@@ -1696,6 +1697,14 @@ async fn process_anthropic_messages(
             "info",
             "v2 preflight",
             &format!("Request {request_id}: {}", assessment.sanitized_summary(),),
+        );
+        // Byte-only context accounting explains the contribution of system,
+        // tools, and history without claiming verified tokenizer accuracy.
+        let context_shape = ContextShape::inspect(&request);
+        state.observability.log(
+            "info",
+            "v2 context shape",
+            &format!("Request {request_id}: {}", context_shape.sanitized_summary()),
         );
         if assessment.failed() {
             state.observability.log(
