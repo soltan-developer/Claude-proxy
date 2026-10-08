@@ -1,0 +1,30 @@
+[package]
+name = "claude-proxy"
+version = "2.0.8"
+description = "Local API proxy for Claude Desktop and Claude Code"
+authors = ["Salman Zadeh"]
+edition = "2021"
+
+[lib]
+name = "claude_proxy_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+axum = "0.7"
+async-stream = "0.3"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "socks"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+tokio = { version = "1", features = ["macros", "net", "sync", "time", "rt-multi-thread"] }
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

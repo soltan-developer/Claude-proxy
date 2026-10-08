@@ -1,0 +1,25 @@
+node_modules/
+.pnpm-store/
+dist/
+src-tauri/target/
+portable/
+
+# Local agent/editor configuration
+.agents/
+.claude/
+
+# Local editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+*.tsbuildinfo
+cargo-test-*.txt
+
+# Local environment and generated test output
+.env
+.env.*
+!.env.example
+coverage/
+

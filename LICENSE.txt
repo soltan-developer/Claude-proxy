@@ -1,0 +1,49 @@
+Salmanzadeh Non-Commercial License 1.0
+SPDX-License-Identifier: LicenseRef-Salmanzadeh-NonCommercial-1.0
+Copyright (c) 2026 Salmanzadeh. All rights reserved.
+
+1. Purpose
+This software was created for Shia researchers, scholars, and developers seeking to advance the interests of Islam and the Islamic Revolution. This statement describes the project's purpose; the permission below is governed by the non-commercial terms in this license.
+
+2. Permission
+The developer grants every person who receives a copy of this software, Claude Proxy (the "Software"), a free, non-exclusive, non-transferable permission to use, reproduce, study, and modify the Software solely for non-commercial purposes, including personal, academic, educational, research, and non-commercial development activities.
+
+You may share an unmodified copy or a modified copy for non-commercial purposes if you include this license and preserve the copyright and attribution notices. You must clearly identify material changes. You may not sublicense any commercial rights.
+
+3. Commercial use requires permission
+Any use primarily intended for commercial advantage or monetary compensation requires the developer's prior written permission. This includes, for example, selling or licensing the Software, charging for access or support that includes it, distributing it as part of a paid product, and operating a paid or revenue-generating service with it. Contact the developer through the project's official channel to request permission.
+
+4. Rights reserved and third-party software
+All rights not expressly granted in this license are reserved by the developer. Components supplied by other authors remain subject to their own license terms; those terms are not replaced by this license.
+
+5. Disclaimer
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE DEVELOPER IS NOT LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE SOFTWARE OR ITS USE.
+
+6. License classification
+This is a custom, source-available, non-commercial license. It is not an OSI-approved open-source license. The identifier above is a LicenseRef for this project's custom terms, not an SPDX standard license grant.
+
+ترجمهٔ فارسی (برای سهولت مطالعه؛ در صورت اختلاف، متن انگلیسی بالا ملاک است)
+
+مجوز غیرتجاری Salmanzadeh، نسخهٔ 1.0
+شناسه: LicenseRef-Salmanzadeh-NonCommercial-1.0
+حق نشر © 2026 Salmanzadeh. تمامی حقوق محفوظ است.
+
+1. هدف
+این نرم‌افزار برای پژوهشگران، محققان و توسعه‌دهندگان شیعه با هدف کمک به پیشبرد منافع اسلام و انقلاب اسلامی تهیه شده است. این بند هدف پروژه را بیان می‌کند؛ اجازهٔ استفاده تابع شرایط غیرتجاری این مجوز است.
+
+2. اجازهٔ استفاده
+توسعه‌دهنده به هر شخصی که نسخه‌ای از این نرم‌افزار، Claude Proxy («نرم‌افزار»)، را دریافت می‌کند، اجازه‌ای رایگان، غیرانحصاری و غیرقابل‌انتقال می‌دهد تا نرم‌افزار را صرفاً برای مقاصد غیرتجاری، از جمله استفادهٔ شخصی، دانشگاهی، آموزشی، پژوهشی و توسعهٔ غیرتجاری، استفاده، تکثیر، بررسی و اصلاح کند.
+
+می‌توانید نسخهٔ تغییرنیافته یا تغییریافته را برای مقاصد غیرتجاری منتشر کنید، مشروط بر آن‌که این مجوز و اعلان‌های حق نشر و انتساب را همراه نسخه نگه دارید و تغییرات اساسی را مشخص کنید. حق تجاری را نمی‌توان به شخص دیگری واگذار کرد.
+
+3. استفادهٔ تجاری نیازمند اجازه است
+هر نوع استفاده‌ای که هدف اصلی آن منفعت تجاری یا کسب درآمد باشد، به اجازهٔ کتبی قبلی توسعه‌دهنده نیاز دارد. فروش یا اعطای مجوز تجاری نرم‌افزار، دریافت هزینه برای دسترسی یا پشتیبانی‌ای که شامل آن می‌شود، انتشار آن به‌عنوان بخشی از محصول پولی و راه‌اندازی خدمات پولی یا درآمدزا با آن از این موارد هستند. برای درخواست اجازه از راه رسمی ارتباطی پروژه با توسعه‌دهنده تماس بگیرید.
+
+4. حقوق محفوظ و نرم‌افزارهای اشخاص ثالث
+تمام حقوقی که صریحاً در این مجوز واگذار نشده‌اند برای توسعه‌دهنده محفوظ‌اند. اجزای متعلق به نویسندگان دیگر تابع مجوزهای خودشان هستند و شرایط آن مجوزها با این مجوز جایگزین نمی‌شود.
+
+5. سلب ضمانت
+نرم‌افزار «همان‌گونه که هست» و بدون هیچ‌گونه ضمانت صریح یا ضمنی، از جمله ضمانت قابلیت فروش، تناسب برای هدفی خاص و عدم نقض حقوق دیگران، ارائه می‌شود. تا بیشترین حد مجاز قانونی، توسعه‌دهنده در قبال ادعا، خسارت یا مسئولیتی که از نرم‌افزار یا استفاده از آن ناشی شود مسئولیتی ندارد.
+
+6. طبقه‌بندی مجوز
+این مجوز اختصاصی، در دسترس همراه کد منبع و محدود به استفادهٔ غیرتجاری است و مجوز متن‌بازِ تأییدشده از سوی OSI محسوب نمی‌شود. شناسهٔ بالا یک LicenseRef برای شرایط اختصاصی این پروژه است، نه اعطای مجوز استاندارد SPDX.
