@@ -49,22 +49,29 @@ impl StreamMachine {
                         let index = self.next_index;
                         self.next_index += 1;
                         self.text_index = Some(index);
-                        events.push(("content_block_start".into(), json!({
-                            "type": "content_block_start", "index": index,
-                            "content_block": {"type": "text", "text": ""}
-                        })));
+                        events.push((
+                            "content_block_start".into(),
+                            json!({
+                                "type": "content_block_start", "index": index,
+                                "content_block": {"type": "text", "text": ""}
+                            }),
+                        ));
                         index
                     }
                 };
-                events.push(("content_block_delta".into(), json!({
-                    "type": "content_block_delta", "index": index,
-                    "delta": {"type": "text_delta", "text": text}
-                })));
+                events.push((
+                    "content_block_delta".into(),
+                    json!({
+                        "type": "content_block_delta", "index": index,
+                        "delta": {"type": "text_delta", "text": text}
+                    }),
+                ));
             }
         }
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for call in calls {
-                if let Some(fragment) = call.pointer("/function/arguments").and_then(Value::as_str) {
+                if let Some(fragment) = call.pointer("/function/arguments").and_then(Value::as_str)
+                {
                     self.tool_json_bytes = self.tool_json_bytes.saturating_add(fragment.len());
                     if self.tool_json_bytes > MAX_TOOL_JSON_BYTES {
                         return Err(StreamContractError::ExcessiveToolArguments);
@@ -120,31 +127,43 @@ impl StreamMachine {
         }
         let mut events = Vec::new();
         if let Some(index) = self.text_index {
-            events.push(("content_block_stop".into(), json!({
-                "type": "content_block_stop", "index": index
-            })));
+            events.push((
+                "content_block_stop".into(),
+                json!({
+                    "type": "content_block_stop", "index": index
+                }),
+            ));
         }
         let has_tools = !tools.is_empty();
         for tool in tools {
             let index = self.next_index;
             self.next_index += 1;
-            events.push(("content_block_start".into(), json!({
-                "type": "content_block_start", "index": index,
-                "content_block": {
-                    "type": "tool_use", "id": tool.id,
-                    "name": tool.name, "input": {}
-                }
-            })));
-            events.push(("content_block_delta".into(), json!({
-                "type": "content_block_delta", "index": index,
-                "delta": {
-                    "type": "input_json_delta",
-                    "partial_json": tool.arguments.to_string()
-                }
-            })));
-            events.push(("content_block_stop".into(), json!({
-                "type": "content_block_stop", "index": index
-            })));
+            events.push((
+                "content_block_start".into(),
+                json!({
+                    "type": "content_block_start", "index": index,
+                    "content_block": {
+                        "type": "tool_use", "id": tool.id,
+                        "name": tool.name, "input": {}
+                    }
+                }),
+            ));
+            events.push((
+                "content_block_delta".into(),
+                json!({
+                    "type": "content_block_delta", "index": index,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": tool.arguments.to_string()
+                    }
+                }),
+            ));
+            events.push((
+                "content_block_stop".into(),
+                json!({
+                    "type": "content_block_stop", "index": index
+                }),
+            ));
         }
         let stop_reason = if has_tools {
             "tool_use"
@@ -153,11 +172,14 @@ impl StreamMachine {
         } else {
             "end_turn"
         };
-        events.push(("message_delta".into(), json!({
-            "type": "message_delta",
-            "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-            "usage": {"output_tokens": reported_output_tokens.unwrap_or(fallback_output_tokens)}
-        })));
+        events.push((
+            "message_delta".into(),
+            json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": stop_reason, "stop_sequence": null},
+                "usage": {"output_tokens": reported_output_tokens.unwrap_or(fallback_output_tokens)}
+            }),
+        ));
         events.push(("message_stop".into(), json!({"type": "message_stop"})));
         Ok(events)
     }
@@ -171,27 +193,41 @@ mod tests {
     #[test]
     fn late_tool_identity_and_interleaved_parallel_calls_are_exact() {
         let mut machine = StreamMachine::default();
-        let a = machine.ingest(&json!({"choices":[{"delta":{"content":"Looking up two files."}}]})).unwrap();
+        let a = machine
+            .ingest(&json!({"choices":[{"delta":{"content":"Looking up two files."}}]}))
+            .unwrap();
         assert_eq!(a[0].0, "content_block_start");
         assert_eq!(a[1].1["delta"]["text"], "Looking up two files.");
-        machine.ingest(&json!({"choices":[{"delta":{"tool_calls":[
-            {"index":1,"function":{"arguments":"{\"pattern\":"}},
-            {"index":0,"function":{"arguments":"{\"path\":"}}
-        ]}}]})).unwrap();
-        machine.ingest(&json!({"choices":[{"delta":{"tool_calls":[
-            {"index":0,"id":"call-read","function":{"name":"Re","arguments":"\"README.md\"}"}},
-            {"index":1,"id":"call-grep","function":{"name":"Grep","arguments":"\"TODO\"}"}}
-        ]}}]})).unwrap();
-        machine.ingest(&json!({"choices":[{"delta":{"tool_calls":[
+        machine
+            .ingest(&json!({"choices":[{"delta":{"tool_calls":[
+                {"index":1,"function":{"arguments":"{\"pattern\":"}},
+                {"index":0,"function":{"arguments":"{\"path\":"}}
+            ]}}]}))
+            .unwrap();
+        machine
+            .ingest(&json!({"choices":[{"delta":{"tool_calls":[
+                {"index":0,"id":"call-read","function":{"name":"Re","arguments":"\"README.md\"}"}},
+                {"index":1,"id":"call-grep","function":{"name":"Grep","arguments":"\"TODO\"}"}}
+            ]}}]}))
+            .unwrap();
+        machine
+            .ingest(&json!({"choices":[{"delta":{"tool_calls":[
             {"index":0,"function":{"name":"ad"}}
-        ]},"finish_reason":"tool_calls"}]})).unwrap();
+        ]},"finish_reason":"tool_calls"}]}))
+            .unwrap();
         let events = machine.finish(Some(55), 1, Some(512)).unwrap();
         assert_eq!(events[0].0, "content_block_stop");
         assert_eq!(events[1].1["content_block"]["id"], "call-read");
         assert_eq!(events[1].1["content_block"]["name"], "Read");
-        assert_eq!(events[2].1["delta"]["partial_json"], r#"{"path":"README.md"}"#);
+        assert_eq!(
+            events[2].1["delta"]["partial_json"],
+            r#"{"path":"README.md"}"#
+        );
         assert_eq!(events[4].1["content_block"]["id"], "call-grep");
-        assert_eq!(events[5].1["delta"]["partial_json"], r#"{"pattern":"TODO"}"#);
+        assert_eq!(
+            events[5].1["delta"]["partial_json"],
+            r#"{"pattern":"TODO"}"#
+        );
         assert_eq!(events[7].1["delta"]["stop_reason"], "tool_use");
         assert_eq!(events[8].0, "message_stop");
     }
@@ -199,9 +235,11 @@ mod tests {
     #[test]
     fn missing_late_metadata_is_an_error_not_fake_tool_name() {
         let mut machine = StreamMachine::default();
-        machine.ingest(&json!({"choices":[{"delta":{"tool_calls":[
+        machine
+            .ingest(&json!({"choices":[{"delta":{"tool_calls":[
             {"index":0,"function":{"arguments":"{}"}}
-        ]},"finish_reason":"tool_calls"}]})).unwrap();
+        ]},"finish_reason":"tool_calls"}]}))
+            .unwrap();
         assert_eq!(
             machine.finish(Some(1), 1, Some(10)),
             Err(StreamContractError::InvalidTool(ToolStreamError::MissingId))
@@ -211,19 +249,27 @@ mod tests {
     #[test]
     fn truncated_json_does_not_emit_tool_use() {
         let mut machine = StreamMachine::default();
-        machine.ingest(&json!({"choices":[{"delta":{"tool_calls":[
+        machine
+            .ingest(&json!({"choices":[{"delta":{"tool_calls":[
             {"index":0,"id":"a","function":{"name":"Read","arguments":"{\"file\":"}}
-        ]},"finish_reason":"tool_calls"}]})).unwrap();
+        ]},"finish_reason":"tool_calls"}]}))
+            .unwrap();
         assert_eq!(
             machine.finish(Some(1), 1, Some(10)),
-            Err(StreamContractError::InvalidTool(ToolStreamError::InvalidJsonArguments))
+            Err(StreamContractError::InvalidTool(
+                ToolStreamError::InvalidJsonArguments
+            ))
         );
     }
 
     #[test]
     fn capped_output_is_not_falsely_reported_as_success() {
         let mut machine = StreamMachine::default();
-        machine.ingest(&json!({"choices":[{"delta":{"content":"many tokens"},"finish_reason":"stop"}]})).unwrap();
+        machine
+            .ingest(
+                &json!({"choices":[{"delta":{"content":"many tokens"},"finish_reason":"stop"}]}),
+            )
+            .unwrap();
         assert_eq!(
             machine.finish(Some(32_001), 0, Some(32_000)),
             Err(StreamContractError::VerifiedOutputOverBudget)
@@ -233,7 +279,9 @@ mod tests {
     #[test]
     fn length_remains_max_tokens_and_never_auto_continues() {
         let mut machine = StreamMachine::default();
-        machine.ingest(&json!({"choices":[{"delta":{"content":"part"},"finish_reason":"length"}]})).unwrap();
+        machine
+            .ingest(&json!({"choices":[{"delta":{"content":"part"},"finish_reason":"length"}]}))
+            .unwrap();
         let events = machine.finish(Some(4), 4, Some(32_000)).unwrap();
         assert_eq!(events[1].1["delta"]["stop_reason"], "max_tokens");
         assert_eq!(events[2].0, "message_stop");
@@ -242,7 +290,9 @@ mod tests {
     #[test]
     fn missing_completion_marker_is_an_error() {
         let mut machine = StreamMachine::default();
-        machine.ingest(&json!({"choices":[{"delta":{"content":"partial"}}]})).unwrap();
+        machine
+            .ingest(&json!({"choices":[{"delta":{"content":"partial"}}]}))
+            .unwrap();
         assert_eq!(
             machine.finish(None, 3, Some(32_000)),
             Err(StreamContractError::MissingFinishReason)
@@ -252,9 +302,17 @@ mod tests {
     #[test]
     fn provider_usage_only_chunk_is_accepted() {
         let mut machine = StreamMachine::default();
-        machine.ingest(&json!({"choices":[{"delta":{},"finish_reason":"stop"}]})).unwrap();
-        assert!(machine.ingest(&json!({"choices":[],"usage":{"completion_tokens":5}})).unwrap().is_empty());
-        assert_eq!(machine.finish(Some(5), 0, Some(32_000)).unwrap()[0].1["usage"]["output_tokens"], 5);
+        machine
+            .ingest(&json!({"choices":[{"delta":{},"finish_reason":"stop"}]}))
+            .unwrap();
+        assert!(machine
+            .ingest(&json!({"choices":[],"usage":{"completion_tokens":5}}))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            machine.finish(Some(5), 0, Some(32_000)).unwrap()[0].1["usage"]["output_tokens"],
+            5
+        );
     }
 
     #[test]

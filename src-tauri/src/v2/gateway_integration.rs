@@ -167,7 +167,6 @@ async fn real_http_gateway_preserves_two_turn_code_tool_loop() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-
 async fn streamed_mock_provider(Json(payload): Json<Value>) -> Response {
     let messages = payload["messages"].as_array().expect("messages");
     let last = messages.last().expect("last message");
@@ -177,13 +176,19 @@ async fn streamed_mock_provider(Json(payload): Json<Value>) -> Response {
     if last["role"] == "tool" {
         assert_eq!(last["tool_call_id"], "call-readme");
         assert_eq!(last["content"], "README test fixture");
-        chunks.push(frame(json!({"choices":[{"delta":{"content":"Inspected README.md."}}]})));
-        chunks.push(frame(json!({"choices":[{"delta":{},"finish_reason":"stop"}]})));
+        chunks.push(frame(
+            json!({"choices":[{"delta":{"content":"Inspected README.md."}}]}),
+        ));
+        chunks.push(frame(
+            json!({"choices":[{"delta":{},"finish_reason":"stop"}]}),
+        ));
     } else if requested == "bad stream" {
         chunks.push(frame(json!({"choices":[{"delta":{"tool_calls":[
             {"index":0,"id":"broken-id","function":{"name":"Read","arguments":"{invalid"}}
         ]}}]})));
-        chunks.push(frame(json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]})));
+        chunks.push(frame(
+            json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+        ));
     } else if requested == "disconnect" {
         chunks.push(frame(json!({"choices":[{"delta":{"content":"partial only"}}]})));
         // Deliberately close upstream without finish_reason or [DONE].
@@ -193,13 +198,19 @@ async fn streamed_mock_provider(Json(payload): Json<Value>) -> Response {
         )
             .into_response();
     } else if requested == "over budget" {
-        chunks.push(frame(json!({"choices":[{"delta":{"content":"text"},"finish_reason":"stop"}]})));
+        chunks.push(frame(
+            json!({"choices":[{"delta":{"content":"text"},"finish_reason":"stop"}]}),
+        ));
     } else if requested == "truncated" {
-        chunks.push(frame(json!({"choices":[{"delta":{"content":"unfinished work"},"finish_reason":"length"}]})));
+        chunks.push(frame(
+            json!({"choices":[{"delta":{"content":"unfinished work"},"finish_reason":"length"}]}),
+        ));
     } else {
         assert_eq!(payload["stream"], true);
         assert_eq!(payload["tools"][0]["function"]["name"], "Read");
-        chunks.push(frame(json!({"choices":[{"delta":{"content":"Inspecting repository."}}]})));
+        chunks.push(frame(
+            json!({"choices":[{"delta":{"content":"Inspecting repository."}}]}),
+        ));
         chunks.push(frame(json!({"choices":[{"delta":{"tool_calls":[
             {"index":1,"function":{"arguments":"{\"pattern\":"}},
             {"index":0,"function":{"arguments":"{\"path\":"}}
@@ -292,22 +303,35 @@ async fn send_streaming_fixture(endpoint: &str, content: &str, with_tools: bool)
 async fn v2_sse_http_parallel_tools_have_complete_ids_and_valid_order() {
     let (endpoint, upstream, server, dir) = start_streaming_fixture().await;
     let events = send_streaming_fixture(&endpoint, "inspect repo", true).await;
-    let names: Vec<&str> = events.iter()
+    let names: Vec<&str> = events
+        .iter()
         .filter_map(|v| v.get("type").and_then(Value::as_str))
         .collect();
     assert_eq!(names.first(), Some(&"message_start"));
     assert_eq!(names.last(), Some(&"message_stop"));
-    let starts: Vec<&Value> = events.iter().filter(|e| e["type"] == "content_block_start").collect();
+    let starts: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["type"] == "content_block_start")
+        .collect();
     assert_eq!(starts.len(), 3);
     assert_eq!(starts[0]["content_block"]["type"], "text");
     assert_eq!(starts[1]["content_block"]["id"], "call-readme");
     assert_eq!(starts[1]["content_block"]["name"], "Read");
     assert_eq!(starts[2]["content_block"]["id"], "call-grep");
     assert_eq!(starts[2]["content_block"]["name"], "Grep");
-    let deltas: Vec<&Value> = events.iter().filter(|e| e["type"] == "content_block_delta").collect();
-    assert_eq!(deltas[1]["delta"]["partial_json"], r#"{"path":"README.md"}"#);
+    let deltas: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["type"] == "content_block_delta")
+        .collect();
+    assert_eq!(
+        deltas[1]["delta"]["partial_json"],
+        r#"{"path":"README.md"}"#
+    );
     assert_eq!(deltas[2]["delta"]["partial_json"], r#"{"pattern":"TODO"}"#);
-    let finish = events.iter().find(|e| e["type"] == "message_delta").unwrap();
+    let finish = events
+        .iter()
+        .find(|e| e["type"] == "message_delta")
+        .unwrap();
     assert_eq!(finish["delta"]["stop_reason"], "tool_use");
     assert_eq!(finish["usage"]["output_tokens"], 30);
     upstream.abort();
@@ -342,7 +366,10 @@ async fn v2_sse_http_verified_over_budget_emits_error_not_fake_stop() {
 async fn v2_sse_http_length_remains_truncated_without_hidden_continuation() {
     let (endpoint, upstream, server, dir) = start_streaming_fixture().await;
     let events = send_streaming_fixture(&endpoint, "truncated", false).await;
-    let end = events.iter().find(|e| e["type"] == "message_delta").unwrap();
+    let end = events
+        .iter()
+        .find(|e| e["type"] == "message_delta")
+        .unwrap();
     assert_eq!(end["delta"]["stop_reason"], "max_tokens");
     assert!(events.iter().any(|e| e["type"] == "message_stop"));
     upstream.abort();
