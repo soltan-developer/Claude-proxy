@@ -24,7 +24,10 @@ impl RequestShape {
         let messages = request.get("messages").and_then(Value::as_array);
         let mut shape = Self {
             messages: messages.map_or(0, Vec::len),
-            tool_definitions: request.get("tools").and_then(Value::as_array).map_or(0, Vec::len),
+            tool_definitions: request
+                .get("tools")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len),
             assistant_tool_uses: 0,
             user_tool_results: 0,
             system_blocks: match request.get("system") {
@@ -56,9 +59,8 @@ impl RequestShape {
                     }
                 }
                 if is_user {
-                    shape.last_user_characters = visible_text_length(
-                        message.get("content").unwrap_or(&Value::Null),
-                    );
+                    shape.last_user_characters =
+                        visible_text_length(message.get("content").unwrap_or(&Value::Null));
                 }
             }
         }
@@ -69,7 +71,8 @@ impl RequestShape {
 fn visible_text_length(content: &Value) -> usize {
     match content {
         Value::String(text) => text.chars().count(),
-        Value::Array(parts) => parts.iter()
+        Value::Array(parts) => parts
+            .iter()
             .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
             .filter_map(|part| part.get("text").and_then(Value::as_str))
             .map(|text| text.chars().count())
@@ -80,8 +83,9 @@ fn visible_text_length(content: &Value) -> usize {
 
 fn has_marker(value: &Value, key: &str) -> bool {
     match value {
-        Value::Object(object) => object.contains_key(key)
-            || object.values().any(|child| has_marker(child, key)),
+        Value::Object(object) => {
+            object.contains_key(key) || object.values().any(|child| has_marker(child, key))
+        }
         Value::Array(items) => items.iter().any(|child| has_marker(child, key)),
         _ => false,
     }
@@ -105,16 +109,16 @@ mod tests {
                    {"type":"text","text":"hello"}]}
             ]
         });
-        let shape=RequestShape::inspect(&request);
-        assert_eq!(shape.messages,3);
-        assert_eq!(shape.tool_definitions,1);
-        assert_eq!(shape.assistant_tool_uses,1);
-        assert_eq!(shape.user_tool_results,1);
-        assert_eq!(shape.last_user_characters,5);
+        let shape = RequestShape::inspect(&request);
+        assert_eq!(shape.messages, 3);
+        assert_eq!(shape.tool_definitions, 1);
+        assert_eq!(shape.assistant_tool_uses, 1);
+        assert_eq!(shape.user_tool_results, 1);
+        assert_eq!(shape.last_user_characters, 5);
         assert!(shape.streaming);
         assert!(shape.has_cache_control);
-        assert_eq!(shape.requested_max_output_tokens,Some(32000));
-        let diagnostic=serde_json::to_string(&shape).unwrap();
+        assert_eq!(shape.requested_max_output_tokens, Some(32000));
+        let diagnostic = serde_json::to_string(&shape).unwrap();
         assert!(!diagnostic.contains("SECRET_SYSTEM"));
         assert!(!diagnostic.contains("old private prompt"));
         assert!(!diagnostic.contains("pwd"));
@@ -122,8 +126,8 @@ mod tests {
 
     #[test]
     fn detects_unsupported_content_instead_of_silently_discarding_it() {
-        let request=json!({"messages":[{"role":"user","content":[{"type":"document","source":{}},
+        let request = json!({"messages":[{"role":"user","content":[{"type":"document","source":{}},
           {"type":"text","text":"check this"}]}]});
-        assert_eq!(RequestShape::inspect(&request).unknown_block_types,1);
+        assert_eq!(RequestShape::inspect(&request).unknown_block_types, 1);
     }
 }
