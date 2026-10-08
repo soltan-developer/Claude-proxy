@@ -15,6 +15,7 @@ use std::{
 
 use crate::observability::{DiagnosticEntry, ObservabilityStore, UsageAggregate, UsageQuery};
 use crate::v2::capabilities::{CapabilityMode, CapabilitySettings};
+use crate::v2::client_output::ClientOutputGuard;
 use crate::v2::context_shape::ContextShape;
 use crate::v2::preflight::{check_chat_completions, stream_enabled, ContractMode};
 use crate::v2::provider_response::validate_completion;
@@ -291,6 +292,7 @@ struct ServerState {
     active_requests: Arc<AtomicUsize>,
     v2_contract_mode: ContractMode,
     v2_stream_enabled: bool,
+    v2_output_guard_enabled: bool,
     v2_capabilities: CapabilitySettings,
 }
 
@@ -1296,6 +1298,12 @@ async fn start_proxy_inner(state: &BridgeState) -> Result<(), String> {
                 &std::env::var("CLAUDE_PROXY_V2_CAPABILITIES").unwrap_or_default(),
                 &std::env::var("CLAUDE_PROXY_V2_MODEL_CAPABILITIES").unwrap_or_default(),
             ),
+            v2_output_guard_enabled: ClientOutputGuard::enabled(
+                ContractMode::from_setting(
+                    &std::env::var("CLAUDE_PROXY_V2_CONTRACTS").unwrap_or_default(),
+                ) == ContractMode::Enforce,
+                &std::env::var("CLAUDE_PROXY_V2_DESKTOP_OUTPUT_CAP").unwrap_or_default(),
+            ),
         })
         .layer(DefaultBodyLimit::max(25 * 1024 * 1024));
     let runtime_id = uuid::Uuid::new_v4();
@@ -1842,11 +1850,53 @@ async fn process_anthropic_messages(
             }
         }
     }
+    // The optional 32k Desktop/Cowork cap is negotiated after proactive
+    // context adjustment, then enforced before *every* provider round.
+    // Streaming needs V2 SSE because the legacy continuation path can
+    // rewrite provider accounting and its stop reason.
+    if state.v2_output_guard_enabled
+        && client_wants_stream
+        && !local_tools_enabled
+        && !state.v2_stream_enabled
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "Enable CLAUDE_PROXY_V2_STREAM=on before using the strict Desktop output cap with streaming.",
+        );
+    }
+    let v2_output_guard = if state.v2_output_guard_enabled {
+        match ClientOutputGuard::negotiate(&request, &payload, route.max_output_tokens) {
+            Ok(guard) => {
+                state.observability.log(
+                    "info",
+                    "v2 output budget",
+                    &format!(
+                        "Request {request_id}: strict upstream output limit {} tokens.",
+                        guard.limit
+                    ),
+                );
+                Some(guard)
+            }
+            Err(failure) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    failure.user_message(),
+                )
+            }
+        }
+    } else {
+        None
+    };
     let upstream_client = state.next_upstream_client();
     let mut web_round = 0usize;
     let mut web_tool_count = 0usize;
     let request_started = Instant::now();
     let completion: Value = loop {
+        if let Some(guard) = v2_output_guard {
+            guard.apply(&mut payload);
+        }
         let queue_started = Instant::now();
         let upstream_permit = match state.upstream_slots.clone().acquire_owned().await {
             Ok(permit) => permit,
@@ -1988,6 +2038,9 @@ async fn process_anthropic_messages(
                 .and_then(Value::as_u64)
                 .filter(|value| *value > 0)
                 .or_else(|| (route.max_output_tokens > 0).then_some(route.max_output_tokens));
+            let client_output_budget = v2_output_guard
+                .map(|guard| guard.limit)
+                .or(client_output_budget);
             return stream_openai_response(
                 upstream,
                 requested_model.to_string(),
@@ -2005,6 +2058,7 @@ async fn process_anthropic_messages(
                 route.max_output_tokens,
                 client_output_budget,
                 state.v2_stream_enabled,
+                v2_output_guard.is_some(),
             );
         }
 
@@ -2023,6 +2077,22 @@ async fn process_anthropic_messages(
                 );
             }
         };
+        // Never forward an over-limit or unmeasured strict-mode response.
+        // This also covers the nonstream local tool loop before execution.
+        if let Some(guard) = v2_output_guard {
+            let measured =
+                parse_provider_usage(value.get("usage").unwrap_or(&Value::Null)).output_tokens;
+            if let Err(failure) = guard.verify_reported_output(measured) {
+                state.observability.log(
+                    "error",
+                    "v2 output budget",
+                    &format!(
+                        "Request {request_id}: provider output validation failed ({failure:?})."
+                    ),
+                );
+                return api_error(StatusCode::BAD_GATEWAY, "api_error", failure.user_message());
+            }
+        }
         // Check the complete provider response before the legacy mapper can
         // invent tool IDs/names or swallow malformed JSON arguments.
         if state.v2_contract_mode == ContractMode::Enforce {
@@ -2292,6 +2362,8 @@ async fn process_anthropic_messages(
                     0
                 },
                 cache_stats_reported,
+                parsed_usage.cached_input_tokens.is_some() && actual_input.is_some(),
+                parsed_usage.cache_write_input_tokens.is_some() && actual_input.is_some(),
                 actual_input.is_none(),
                 actual_output.is_none(),
             ) {
@@ -4005,6 +4077,7 @@ fn stream_openai_response(
     continuation_output_limit: u64,
     client_output_budget: Option<u64>,
     v2_stream_enabled: bool,
+    v2_require_measured_output: bool,
 ) -> Response {
     let mut bytes = upstream.bytes_stream();
     let stream = async_stream::stream! {
@@ -4271,6 +4344,18 @@ fn stream_openai_response(
                 }
             }
         }
+        if !stream_failed && completed && v2_require_measured_output && state.output_estimated {
+            stream_failed = true;
+            observability.log(
+                "error",
+                "v2 output budget",
+                "Provider omitted measured output usage in strict streamed mode.",
+            );
+            yield Ok(Bytes::from(encode_sse(
+                "error",
+                json!({ "type": "error", "error": { "type": "api_error", "message": "The provider omitted measured output usage; this response cannot be verified against the Desktop output limit." } }),
+            )));
+        }
         if !stream_failed && completed {
             if let Some(machine) = v2_machine.take() {
                 let measured = (!state.output_estimated).then_some(state.output_tokens);
@@ -4330,6 +4415,8 @@ fn stream_openai_response(
                     0
                 },
                 cache_stats_reported,
+                state.cached_input_reported && !state.input_estimated,
+                state.cache_write_reported && !state.input_estimated,
                 state.input_estimated,
                 state.output_estimated,
             ) {
@@ -4371,6 +4458,8 @@ struct AnthropicStreamState {
     cached_input_tokens: u64,
     cache_write_input_tokens: u64,
     cache_stats_reported: bool,
+    cached_input_reported: bool,
+    cache_write_reported: bool,
     output_tokens: u64,
     output_estimated: bool,
     output_ascii_chars: u64,
@@ -4452,9 +4541,11 @@ impl AnthropicStreamState {
             self.cache_stats_reported = true;
             if let Some(tokens) = usage.cached_input_tokens {
                 self.cached_input_tokens = tokens;
+                self.cached_input_reported = true;
             }
             if let Some(tokens) = usage.cache_write_input_tokens {
                 self.cache_write_input_tokens = tokens;
+                self.cache_write_reported = true;
             }
         }
         events

@@ -39,6 +39,10 @@ struct UsageRecord {
     cache_stats_input_tokens: u64,
     #[serde(default)]
     cache_stats_reported: bool,
+    #[serde(default)]
+    cache_read_reported: Option<bool>,
+    #[serde(default)]
+    cache_write_reported: Option<bool>,
     input_estimated: bool,
     output_estimated: bool,
 }
@@ -68,6 +72,8 @@ pub struct UsageAggregate {
     pub cache_write_input_tokens: u64,
     pub cache_stats_input_tokens: u64,
     pub cache_stats_reported_requests: u64,
+    pub cache_read_reported_requests: u64,
+    pub cache_write_reported_requests: u64,
     pub requests: u64,
     pub estimated_input_requests: u64,
     pub estimated_output_requests: u64,
@@ -102,6 +108,8 @@ impl ObservabilityStore {
         cache_write_input_tokens: u64,
         cache_stats_input_tokens: u64,
         cache_stats_reported: bool,
+        cache_read_reported: bool,
+        cache_write_reported: bool,
         input_estimated: bool,
         output_estimated: bool,
     ) -> Result<(), String> {
@@ -116,6 +124,8 @@ impl ObservabilityStore {
             cache_write_input_tokens,
             cache_stats_input_tokens,
             cache_stats_reported,
+            cache_read_reported: Some(cache_read_reported),
+            cache_write_reported: Some(cache_write_reported),
             input_estimated,
             output_estimated,
         };
@@ -168,6 +178,8 @@ impl ObservabilityStore {
                 cache_write_input_tokens: 0,
                 cache_stats_input_tokens: 0,
                 cache_stats_reported_requests: 0,
+                cache_read_reported_requests: 0,
+                cache_write_reported_requests: 0,
                 requests: 0,
                 estimated_input_requests: 0,
                 estimated_output_requests: 0,
@@ -186,6 +198,12 @@ impl ObservabilityStore {
             aggregate.cache_stats_reported_requests = aggregate
                 .cache_stats_reported_requests
                 .saturating_add(if record.cache_stats_reported { 1 } else { 0 });
+            aggregate.cache_read_reported_requests = aggregate
+                .cache_read_reported_requests
+                .saturating_add(u64::from(record.cache_read_reported == Some(true)));
+            aggregate.cache_write_reported_requests = aggregate
+                .cache_write_reported_requests
+                .saturating_add(u64::from(record.cache_write_reported == Some(true)));
             aggregate.requests = aggregate.requests.saturating_add(1);
             aggregate.estimated_input_requests = aggregate
                 .estimated_input_requests
@@ -324,4 +342,55 @@ fn truncate(value: &str, max_chars: usize) -> String {
         text.push('…');
     }
     text
+}
+
+#[cfg(test)]
+mod v2_coverage_tests {
+    use super::*;
+
+    #[test]
+    fn cache_reads_and_writes_have_independent_reporting_coverage() {
+        let dir = std::env::temp_dir().join(format!("qbs2-usage-test-{}", uuid::Uuid::new_v4()));
+        let store = ObservabilityStore::new(dir.join("usage.jsonl"), dir.join("logs.jsonl"));
+        store
+            .record_usage(
+                "mock", "model", "route", 100, 12, 0, 5, 100, true, false, true, false, false,
+            )
+            .unwrap();
+        store
+            .record_usage(
+                "mock", "model", "route", 100, 12, 0, 0, 0, false, false, false, false, false,
+            )
+            .unwrap();
+        store
+            .record_usage(
+                "mock", "model", "route", 100, 12, 0, 0, 100, true, true, false, false, false,
+            )
+            .unwrap();
+        let aggregate = store
+            .usage(UsageQuery {
+                start_timestamp: unix_time().saturating_sub(10),
+                end_timestamp: unix_time().saturating_add(10),
+                utc_offset_minutes: 0,
+            })
+            .unwrap();
+        assert_eq!(aggregate.len(), 1);
+        assert_eq!(aggregate[0].requests, 3);
+        assert_eq!(aggregate[0].cache_stats_reported_requests, 2);
+        assert_eq!(aggregate[0].cache_read_reported_requests, 1);
+        assert_eq!(aggregate[0].cache_write_reported_requests, 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn old_usage_records_without_new_fields_deserialize_as_unknown() {
+        let record: UsageRecord = serde_json::from_value(serde_json::json!({
+            "timestamp":1,"provider":"mock","model":"x","requestedModel":"alias",
+            "inputTokens":100,"outputTokens":10,"cachedInputTokens":0,
+            "cacheStatsReported":true,"inputEstimated":false,"outputEstimated":false
+        }))
+        .unwrap();
+        assert_eq!(record.cache_read_reported, None);
+        assert_eq!(record.cache_write_reported, None);
+    }
 }

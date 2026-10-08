@@ -69,6 +69,7 @@ fn test_server_state(provider_port: u16, mode: ContractMode) -> (ServerState, st
             active_requests: Arc::new(AtomicUsize::new(0)),
             v2_contract_mode: mode,
             v2_stream_enabled: false,
+            v2_output_guard_enabled: false,
             v2_capabilities: CapabilitySettings::from_strings("", ""),
         },
         dir,
@@ -484,6 +485,127 @@ async fn v2_strict_provider_response_rejects_missing_tool_id_over_real_http() {
         .unwrap()
         .contains("invalid tool response"));
     upstream.abort();
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+async fn output_budget_mock_provider(Json(payload): Json<Value>) -> Json<Value> {
+    let requested = payload["max_tokens"]
+        .as_u64()
+        .expect("output budget supplied");
+    assert!(requested > 0 && requested <= 32_000);
+    let scenario = payload
+        .pointer("/messages/0/content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let usage = match scenario {
+        "exceeded" => Some(json!({"prompt_tokens":100,"completion_tokens":requested + 1})),
+        "unreported" => None,
+        _ => Some(json!({"prompt_tokens":100,"completion_tokens":requested.min(8)})),
+    };
+    let mut answer = json!({
+        "id":"mock-output",
+        "choices":[{"finish_reason":"stop","message":{
+            "role":"assistant","content":"The model stopped at the negotiated limit."
+        }}]
+    });
+    if let Some(usage) = usage {
+        answer["usage"] = usage;
+    }
+    Json(answer)
+}
+
+#[tokio::test]
+async fn v2_output_cap_http_rejects_unmeasured_and_overlimit_provider_replies() {
+    let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider_port = provider.local_addr().unwrap().port();
+    let upstream = tokio::spawn(async move {
+        axum::serve(
+            provider,
+            Router::new().route("/v1/chat/completions", post(output_budget_mock_provider)),
+        )
+        .await
+        .unwrap();
+    });
+    let (mut state, dir) = test_server_state(provider_port, ContractMode::Enforce);
+    state.v2_output_guard_enabled = true;
+    state.config.write().await.routes[0].max_output_tokens = 64_000;
+    let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = gateway.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            gateway,
+            Router::new()
+                .route("/v1/messages", post(anthropic_messages))
+                .with_state(state),
+        )
+        .await
+        .unwrap();
+    });
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}/v1/messages");
+    for (scenario, status) in [
+        ("within limit", reqwest::StatusCode::OK),
+        ("exceeded", reqwest::StatusCode::BAD_GATEWAY),
+        ("unreported", reqwest::StatusCode::BAD_GATEWAY),
+    ] {
+        let response = client
+            .post(&url)
+            .bearer_auth("test-gateway-token")
+            .json(&json!({
+                "model":"claude-sonnet-5-5",
+                "stream":false,"max_tokens":64000,
+                "messages":[{"role":"user","content":scenario}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "scenario={scenario}");
+        let value: Value = response.json().await.unwrap();
+        if status == reqwest::StatusCode::OK {
+            assert_eq!(value["stop_reason"], "end_turn");
+        } else {
+            assert_eq!(value["error"]["type"], "api_error");
+        }
+    }
+    server.abort();
+    upstream.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn v2_output_cap_requires_strict_sse_for_streamed_requests() {
+    let (mut state, dir) = test_server_state(1, ContractMode::Enforce);
+    state.v2_output_guard_enabled = true;
+    state.v2_stream_enabled = false;
+    let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = gateway.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            gateway,
+            Router::new()
+                .route("/v1/messages", post(anthropic_messages))
+                .with_state(state),
+        )
+        .await
+        .unwrap();
+    });
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .bearer_auth("test-gateway-token")
+        .json(&json!({
+            "model":"claude-sonnet-5-5","stream":true,"max_tokens":64000,
+            "messages":[{"role":"user","content":"write very long answer"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let value: Value = response.json().await.unwrap();
+    assert!(value["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("CLAUDE_PROXY_V2_STREAM"));
     server.abort();
     let _ = std::fs::remove_dir_all(dir);
 }
