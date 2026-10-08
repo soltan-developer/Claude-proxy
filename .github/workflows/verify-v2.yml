@@ -7,6 +7,7 @@ on:
       - 'src-tauri/src/lib.rs'
       - 'src-tauri/src/bridge_v2.rs'
       - 'src-tauri/src/observability.rs'
+      - 'scripts/verify-local-code.ps1'
       - 'src/UsagePage.tsx'
       - 'src/types.ts'
       - 'src/**'
@@ -31,6 +32,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+      - name: Validate local Code smoke script in dry-run (no credentials or provider calls)
+        shell: pwsh
+        run: ./scripts/verify-local-code.ps1
       - name: Check Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - name: Run all Rust tests, including v2 contracts
