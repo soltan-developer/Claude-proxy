@@ -5,5 +5,6 @@
 pub(crate) mod output_budget;
 pub(crate) mod request_shape;
 pub(crate) mod usage;
+pub(crate) mod tool_stream;
 
 pub(crate) use request_shape::RequestShape;
