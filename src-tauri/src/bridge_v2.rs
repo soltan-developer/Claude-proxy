@@ -2357,6 +2357,8 @@ async fn process_anthropic_messages(
                     0
                 },
                 cache_stats_reported,
+                parsed_usage.cached_input_tokens.is_some() && actual_input.is_some(),
+                parsed_usage.cache_write_input_tokens.is_some() && actual_input.is_some(),
                 actual_input.is_none(),
                 actual_output.is_none(),
             ) {
@@ -4408,6 +4410,8 @@ fn stream_openai_response(
                     0
                 },
                 cache_stats_reported,
+                state.cached_input_reported && !state.input_estimated,
+                state.cache_write_reported && !state.input_estimated,
                 state.input_estimated,
                 state.output_estimated,
             ) {
@@ -4449,6 +4453,8 @@ struct AnthropicStreamState {
     cached_input_tokens: u64,
     cache_write_input_tokens: u64,
     cache_stats_reported: bool,
+    cached_input_reported: bool,
+    cache_write_reported: bool,
     output_tokens: u64,
     output_estimated: bool,
     output_ascii_chars: u64,
@@ -4530,9 +4536,11 @@ impl AnthropicStreamState {
             self.cache_stats_reported = true;
             if let Some(tokens) = usage.cached_input_tokens {
                 self.cached_input_tokens = tokens;
+                self.cached_input_reported = true;
             }
             if let Some(tokens) = usage.cache_write_input_tokens {
                 self.cache_write_input_tokens = tokens;
+                self.cache_write_reported = true;
             }
         }
         events
