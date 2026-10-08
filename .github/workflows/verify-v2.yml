@@ -45,8 +45,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'npm'
       - name: Install frontend dependencies
-        run: npm ci --no-audit --no-fund
+        # The repository currently has no package-lock.json; add one before
+        # switching this job to a fully reproducible npm ci install.
+        run: npm install --no-package-lock --no-audit --no-fund
       - name: Typecheck and build frontend
         run: npm run build
