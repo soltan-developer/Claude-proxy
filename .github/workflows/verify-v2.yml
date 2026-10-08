@@ -1,0 +1,31 @@
+name: Verify v2 contracts
+
+on:
+  pull_request:
+    paths:
+      - 'src-tauri/src/v2/**'
+      - 'src-tauri/src/lib.rs'
+      - 'src-tauri/src/bridge_v2.rs'
+      - '.github/workflows/verify-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  v2-contracts:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - name: Run all Rust tests, including v2 contracts
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
