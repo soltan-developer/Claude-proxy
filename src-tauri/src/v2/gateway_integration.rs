@@ -166,3 +166,178 @@ async fn real_http_gateway_preserves_two_turn_code_tool_loop() {
     provider_task.abort();
     let _ = std::fs::remove_dir_all(dir);
 }
+
+
+async fn streamed_mock_provider(Json(payload): Json<Value>) -> Response {
+    let messages = payload["messages"].as_array().expect("messages");
+    let last = messages.last().expect("last message");
+    let mut chunks = Vec::new();
+    let requested = last["content"].as_str().unwrap_or("");
+    let frame = |value: Value| format!("data: {}\n\n", value);
+    if last["role"] == "tool" {
+        assert_eq!(last["tool_call_id"], "call-readme");
+        assert_eq!(last["content"], "README test fixture");
+        chunks.push(frame(json!({"choices":[{"delta":{"content":"Inspected README.md."}}]})));
+        chunks.push(frame(json!({"choices":[{"delta":{},"finish_reason":"stop"}]})));
+    } else if requested == "bad stream" {
+        chunks.push(frame(json!({"choices":[{"delta":{"tool_calls":[
+            {"index":0,"id":"broken-id","function":{"name":"Read","arguments":"{invalid"}}
+        ]}}]})));
+        chunks.push(frame(json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]})));
+    } else if requested == "over budget" {
+        chunks.push(frame(json!({"choices":[{"delta":{"content":"text"},"finish_reason":"stop"}]})));
+    } else if requested == "truncated" {
+        chunks.push(frame(json!({"choices":[{"delta":{"content":"unfinished work"},"finish_reason":"length"}]})));
+    } else {
+        assert_eq!(payload["stream"], true);
+        assert_eq!(payload["tools"][0]["function"]["name"], "Read");
+        chunks.push(frame(json!({"choices":[{"delta":{"content":"Inspecting repository."}}]})));
+        chunks.push(frame(json!({"choices":[{"delta":{"tool_calls":[
+            {"index":1,"function":{"arguments":"{\"pattern\":"}},
+            {"index":0,"function":{"arguments":"{\"path\":"}}
+        ]}}]})));
+        chunks.push(frame(json!({"choices":[{"delta":{"tool_calls":[
+            {"index":0,"id":"call-readme","function":{"name":"Re","arguments":"\"README.md\"}"}},
+            {"index":1,"id":"call-grep","function":{"name":"Grep","arguments":"\"TODO\"}"}}
+        ]}}]})));
+        chunks.push(frame(json!({"choices":[{"delta":{"tool_calls":[
+            {"index":0,"function":{"name":"ad"}}
+        ]},"finish_reason":"tool_calls"}]})));
+    }
+    let output = if requested == "over budget" { 129 } else { 30 };
+    chunks.push(frame(json!({"choices":[],"usage":{
+        "prompt_tokens":120,"completion_tokens":output
+    }})));
+    chunks.push("data: [DONE]\n\n".into());
+    (
+        [(header::CONTENT_TYPE, "text/event-stream")],
+        chunks.join(""),
+    )
+        .into_response()
+}
+
+async fn start_streaming_fixture() -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    tokio::task::JoinHandle<()>,
+    std::path::PathBuf,
+) {
+    let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = provider.local_addr().unwrap().port();
+    let upstream = tokio::spawn(async move {
+        axum::serve(
+            provider,
+            Router::new().route("/v1/chat/completions", post(streamed_mock_provider)),
+        )
+        .await
+        .unwrap();
+    });
+    let (mut state, dir) = test_server_state(port, ContractMode::Enforce);
+    state.v2_stream_enabled = true;
+    let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_port = gateway.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            gateway,
+            Router::new()
+                .route("/v1/messages", post(anthropic_messages))
+                .with_state(state),
+        )
+        .await
+        .unwrap();
+    });
+    (
+        format!("http://127.0.0.1:{gateway_port}/v1/messages"),
+        upstream,
+        server,
+        dir,
+    )
+}
+
+async fn send_streaming_fixture(endpoint: &str, content: &str, with_tools: bool) -> Vec<Value> {
+    let mut body = json!({
+        "model":"claude-sonnet-5-5","stream":true,"max_tokens":128,
+        "messages":[{"role":"user","content":content}]
+    });
+    if with_tools {
+        body["tools"] = json!([
+            {"name":"Read","input_schema":{"type":"object"}},
+            {"name":"Grep","input_schema":{"type":"object"}}
+        ]);
+    }
+    let response = reqwest::Client::new()
+        .post(endpoint)
+        .bearer_auth("test-gateway-token")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let raw = response.text().await.unwrap();
+    raw.split("\n\n")
+        .filter_map(|s| s.lines().find_map(|line| line.strip_prefix("data: ")))
+        .map(|v| serde_json::from_str::<Value>(v).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn v2_sse_http_parallel_tools_have_complete_ids_and_valid_order() {
+    let (endpoint, upstream, server, dir) = start_streaming_fixture().await;
+    let events = send_streaming_fixture(&endpoint, "inspect repo", true).await;
+    let names: Vec<&str> = events.iter()
+        .filter_map(|v| v.get("type").and_then(Value::as_str))
+        .collect();
+    assert_eq!(names.first(), Some(&"message_start"));
+    assert_eq!(names.last(), Some(&"message_stop"));
+    let starts: Vec<&Value> = events.iter().filter(|e| e["type"] == "content_block_start").collect();
+    assert_eq!(starts.len(), 3);
+    assert_eq!(starts[0]["content_block"]["type"], "text");
+    assert_eq!(starts[1]["content_block"]["id"], "call-readme");
+    assert_eq!(starts[1]["content_block"]["name"], "Read");
+    assert_eq!(starts[2]["content_block"]["id"], "call-grep");
+    assert_eq!(starts[2]["content_block"]["name"], "Grep");
+    let deltas: Vec<&Value> = events.iter().filter(|e| e["type"] == "content_block_delta").collect();
+    assert_eq!(deltas[1]["delta"]["partial_json"], r#"{"path":"README.md"}"#);
+    assert_eq!(deltas[2]["delta"]["partial_json"], r#"{"pattern":"TODO"}"#);
+    let finish = events.iter().find(|e| e["type"] == "message_delta").unwrap();
+    assert_eq!(finish["delta"]["stop_reason"], "tool_use");
+    assert_eq!(finish["usage"]["output_tokens"], 30);
+    upstream.abort();
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn v2_sse_http_broken_tool_call_yields_error_without_false_success() {
+    let (endpoint, upstream, server, dir) = start_streaming_fixture().await;
+    let events = send_streaming_fixture(&endpoint, "bad stream", false).await;
+    assert!(events.iter().any(|e| e["type"] == "error"));
+    assert!(!events.iter().any(|e| e["type"] == "message_stop"));
+    assert!(!events.iter().any(|e| e["type"] == "content_block_start"));
+    upstream.abort();
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn v2_sse_http_verified_over_budget_emits_error_not_fake_stop() {
+    let (endpoint, upstream, server, dir) = start_streaming_fixture().await;
+    let events = send_streaming_fixture(&endpoint, "over budget", false).await;
+    assert!(events.iter().any(|e| e["type"] == "error"));
+    assert!(!events.iter().any(|e| e["type"] == "message_stop"));
+    upstream.abort();
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn v2_sse_http_length_remains_truncated_without_hidden_continuation() {
+    let (endpoint, upstream, server, dir) = start_streaming_fixture().await;
+    let events = send_streaming_fixture(&endpoint, "truncated", false).await;
+    let end = events.iter().find(|e| e["type"] == "message_delta").unwrap();
+    assert_eq!(end["delta"]["stop_reason"], "max_tokens");
+    assert!(events.iter().any(|e| e["type"] == "message_stop"));
+    upstream.abort();
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
