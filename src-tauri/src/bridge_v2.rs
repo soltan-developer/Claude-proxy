@@ -4701,6 +4701,26 @@ fn require_ready(config: &AppConfig) -> Result<(), String> {
     Ok(())
 }
 
+// In Claude Desktop third-party mode the FIRST model is the UI default.
+// Family tier metadata allows Code/Cowork to resolve bare names (e.g. "sonnet").
+fn desktop_inference_models(config: &AppConfig) -> Vec<Value> {
+    let mut routes = normalize_routes(config.routes.clone());
+    routes.sort_by_key(|route| !route.is_default);
+    let labels = route_labels(&routes);
+    routes
+        .iter()
+        .zip(labels)
+        .map(|(route, label)| {
+            json!({
+                "name": route.route_id,
+                "labelOverride": label,
+                "anthropicFamilyTier": route.tier,
+                "isFamilyDefault": true
+            })
+        })
+        .collect()
+}
+
 fn write_desktop_profile(config: &AppConfig, token: &str) -> Result<(), String> {
     require_ready(config)?;
     let local_app_data = std::env::var_os("LOCALAPPDATA")
@@ -4721,18 +4741,7 @@ fn write_desktop_profile(config: &AppConfig, token: &str) -> Result<(), String> 
         "http://{}:{}{}",
         LOCAL_HOST, config.proxy_port, CLAUDE_DESKTOP_PREFIX
     );
-    let routes = normalize_routes(config.routes.clone());
-    let labels = route_labels(&routes);
-    let inference_models: Vec<Value> = routes
-        .iter()
-        .zip(labels)
-        .map(|(route, label)| {
-            json!({
-                "name": route.route_id,
-                "labelOverride": label
-            })
-        })
-        .collect();
+    let inference_models = desktop_inference_models(config);
     let profile = json!({
         "inferenceProvider": "gateway",
         "inferenceGatewayBaseUrl": base_url,
@@ -5745,6 +5754,32 @@ mod tests {
         });
         assert!(local_tool_calls(&client_tool).is_none());
     }
+    #[test]
+    fn desktop_profile_models_use_selected_default_and_family_tiers() {
+        let mut config = AppConfig::default();
+        let mut fable = fable_route();
+        fable.is_default = false;
+        let sonnet = ModelRoute {
+            route_id: "claude-sonnet-5-5".into(),
+            display_name: "Sonnet · upstream".into(),
+            upstream_model: "example-sonnet".into(),
+            tier: "sonnet".into(),
+            context_window: 200_000,
+            max_output_tokens: 8_000,
+            is_default: true,
+        };
+        // The user's selected default is not the first stored route.
+        config.routes = vec![fable, sonnet];
+        let models = desktop_inference_models(&config);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["name"], "claude-sonnet-5-5");
+        assert_eq!(models[0]["anthropicFamilyTier"], "sonnet");
+        assert_eq!(models[0]["isFamilyDefault"], true);
+        assert_eq!(models[1]["name"], "claude-fable-5-1");
+        assert_eq!(models[1]["anthropicFamilyTier"], "fable");
+        assert_eq!(models[1]["isFamilyDefault"], true);
+    }
+
     #[test]
     fn claude_code_settings_keep_the_selected_default_and_preserve_unrelated_values() {
         let mut config = AppConfig::default();
