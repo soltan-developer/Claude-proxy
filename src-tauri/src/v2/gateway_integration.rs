@@ -69,6 +69,7 @@ fn test_server_state(provider_port: u16, mode: ContractMode) -> (ServerState, st
             active_requests: Arc::new(AtomicUsize::new(0)),
             v2_contract_mode: mode,
             v2_stream_enabled: false,
+            v2_capabilities: CapabilitySettings::from_strings("", ""),
         },
         dir,
     )
@@ -385,6 +386,103 @@ async fn v2_sse_http_upstream_disconnect_reports_error_instead_of_completion() {
     let events = send_streaming_fixture(&endpoint, "disconnect", false).await;
     assert!(events.iter().any(|e| e["type"] == "error"));
     assert!(!events.iter().any(|e| e["type"] == "message_stop"));
+    upstream.abort();
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn v2_capability_gate_blocks_unverified_code_tools_before_upstream_io() {
+    let (mut state, dir) = test_server_state(1, ContractMode::Enforce);
+    state.v2_capabilities = CapabilitySettings::from_strings(
+        "enforce",
+        r#"{"mock-upstream":{"tools":false,"streaming":true}}"#,
+    );
+    let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = gateway.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            gateway,
+            Router::new()
+                .route("/v1/messages", post(anthropic_messages))
+                .with_state(state),
+        )
+        .await
+        .unwrap();
+    });
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .bearer_auth("test-gateway-token")
+        .json(&json!({
+            "model": "claude-sonnet-5-5",
+            "max_tokens": 512, "stream": false,
+            "tools": [{"name": "Read", "input_schema": {"type": "object"}}],
+            "messages": [{"role": "user", "content": "Inspect the repository."}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let response: Value = response.json().await.unwrap();
+    assert!(response["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not verified for tool calling"));
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+async fn malformed_tool_provider(Json(_body): Json<Value>) -> Json<Value> {
+    Json(json!({
+        "id": "invalid-tool-response",
+        "choices": [{"finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": null,
+            "tool_calls": [{"type": "function", "function": {
+                "name": "Read", "arguments": "{}"
+            }}]
+        }}]
+    }))
+}
+
+#[tokio::test]
+async fn v2_strict_provider_response_rejects_missing_tool_id_over_real_http() {
+    let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider_port = provider.local_addr().unwrap().port();
+    let upstream = tokio::spawn(async move {
+        axum::serve(
+            provider,
+            Router::new().route("/v1/chat/completions", post(malformed_tool_provider)),
+        )
+        .await
+        .unwrap();
+    });
+    let (state, dir) = test_server_state(provider_port, ContractMode::Enforce);
+    let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = gateway.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            gateway,
+            Router::new()
+                .route("/v1/messages", post(anthropic_messages))
+                .with_state(state),
+        )
+        .await
+        .unwrap();
+    });
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .bearer_auth("test-gateway-token")
+        .json(&json!({"model": "claude-sonnet-5-5", "max_tokens": 256,
+            "stream": false, "messages": [{"role": "user", "content": "Read file"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let value: Value = response.json().await.unwrap();
+    assert!(value["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("invalid tool response"));
     upstream.abort();
     server.abort();
     let _ = std::fs::remove_dir_all(dir);
