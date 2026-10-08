@@ -391,7 +391,6 @@ async fn v2_sse_http_upstream_disconnect_reports_error_instead_of_completion() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-
 #[tokio::test]
 async fn v2_capability_gate_blocks_unverified_code_tools_before_upstream_io() {
     let (mut state, dir) = test_server_state(1, ContractMode::Enforce);

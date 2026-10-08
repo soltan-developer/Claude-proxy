@@ -14,8 +14,8 @@ use std::{
 };
 
 use crate::observability::{DiagnosticEntry, ObservabilityStore, UsageAggregate, UsageQuery};
-use crate::v2::preflight::{check_chat_completions, stream_enabled, ContractMode};
 use crate::v2::capabilities::{CapabilityMode, CapabilitySettings};
+use crate::v2::preflight::{check_chat_completions, stream_enabled, ContractMode};
 use crate::v2::provider_response::validate_completion;
 use crate::v2::stream_machine::{StreamContractError, StreamMachine};
 use axum::{
@@ -1740,7 +1740,10 @@ async fn process_anthropic_messages(
     let web_enabled = add_web_tools(&mut payload, &config, web_intent);
     let shell_enabled = add_shell_tool(&mut payload, &config);
     let local_tools_enabled = web_enabled || shell_enabled;
-    if let Some(result) = state.v2_capabilities.assess(&route.upstream_model, &payload) {
+    if let Some(result) = state
+        .v2_capabilities
+        .assess(&route.upstream_model, &payload)
+    {
         if let Err(failure) = result {
             state.observability.log(
                 "warning",
@@ -2017,11 +2020,7 @@ async fn process_anthropic_messages(
                     "v2 provider response",
                     &format!("Request {request_id}: invalid provider tool response ({failure:?})."),
                 );
-                return api_error(
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
-                    failure.user_message(),
-                );
+                return api_error(StatusCode::BAD_GATEWAY, "api_error", failure.user_message());
             }
         }
         drop(upstream_permit);

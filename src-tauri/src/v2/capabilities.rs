@@ -98,36 +98,42 @@ impl Capabilities {
         let past_tools = messages.is_some_and(|messages| {
             messages.iter().any(|message| {
                 message.get("role").and_then(Value::as_str) == Some("tool")
-                    || message.get("tool_calls").and_then(Value::as_array)
+                    || message
+                        .get("tool_calls")
+                        .and_then(Value::as_array)
                         .is_some_and(|calls| !calls.is_empty())
             })
         });
-        let declared_tools = payload.get("tools").and_then(Value::as_array)
+        let declared_tools = payload
+            .get("tools")
+            .and_then(Value::as_array)
             .is_some_and(|tools| !tools.is_empty());
-        if (past_tools || declared_tools || payload.get("tool_choice").is_some())
-            && !self.tools
-        {
+        if (past_tools || declared_tools || payload.get("tool_choice").is_some()) && !self.tools {
             return Err(CapabilityFailure::ToolsUnavailable);
         }
-        if payload.get("stream").and_then(Value::as_bool) == Some(true)
-            && !self.streaming
-        {
+        if payload.get("stream").and_then(Value::as_bool) == Some(true) && !self.streaming {
             return Err(CapabilityFailure::StreamingUnavailable);
         }
         let has_vision = messages.is_some_and(|messages| {
             messages.iter().any(|message| {
-                message.get("content").and_then(Value::as_array).is_some_and(|parts| {
-                    parts.iter().any(|part| part.get("type").and_then(Value::as_str)
-                        == Some("image_url"))
-                })
+                message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|parts| {
+                        parts.iter().any(|part| {
+                            part.get("type").and_then(Value::as_str) == Some("image_url")
+                        })
+                    })
             })
         });
         if has_vision && !self.vision {
             return Err(CapabilityFailure::VisionUnavailable);
         }
         if payload.get("reasoning_effort").is_some()
-            || payload.pointer("/chat_template_kwargs/enable_thinking")
-                .and_then(Value::as_bool) == Some(true)
+            || payload
+                .pointer("/chat_template_kwargs/enable_thinking")
+                .and_then(Value::as_bool)
+                == Some(true)
         {
             if !self.reasoning {
                 return Err(CapabilityFailure::ReasoningUnavailable);
@@ -206,31 +212,54 @@ mod tests {
     #[test]
     fn catches_vision_parallel_reasoning_and_output_limits() {
         let gate = CapabilitySettings::from_strings("enforce", PROFILES);
-        assert_eq!(gate.assess("upstream-code", &json!({"messages":[{"content":[
-            {"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}
-        ]}]})), Some(Err(CapabilityFailure::VisionUnavailable)));
-        assert_eq!(gate.assess("upstream-text", &json!({"stream":false,
-            "parallel_tool_calls":true})), Some(Err(CapabilityFailure::ParallelToolsUnavailable)));
-        assert_eq!(gate.assess("upstream-code", &json!({"reasoning_effort":"high"})),
-            Some(Err(CapabilityFailure::ReasoningUnavailable)));
-        assert_eq!(gate.assess("upstream-code", &json!({"max_tokens":32000})),
-            Some(Err(CapabilityFailure::OutputLimitExceeded)));
+        assert_eq!(
+            gate.assess(
+                "upstream-code",
+                &json!({"messages":[{"content":[
+                    {"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}
+                ]}]})
+            ),
+            Some(Err(CapabilityFailure::VisionUnavailable))
+        );
+        assert_eq!(
+            gate.assess(
+                "upstream-text",
+                &json!({"stream":false,
+            "parallel_tool_calls":true})
+            ),
+            Some(Err(CapabilityFailure::ParallelToolsUnavailable))
+        );
+        assert_eq!(
+            gate.assess("upstream-code", &json!({"reasoning_effort":"high"})),
+            Some(Err(CapabilityFailure::ReasoningUnavailable))
+        );
+        assert_eq!(
+            gate.assess("upstream-code", &json!({"max_tokens":32000})),
+            Some(Err(CapabilityFailure::OutputLimitExceeded))
+        );
     }
 
     #[test]
     fn malformed_profile_fails_closed_in_enforce_mode() {
-        let gate = CapabilitySettings::from_strings("enforce", r#"{
+        let gate = CapabilitySettings::from_strings(
+            "enforce",
+            r#"{
           "upstream-code":{"tools":"yes","streaming":true}
-        }"#);
-        assert_eq!(gate.assess("upstream-code", &json!({})),
-            Some(Err(CapabilityFailure::MissingOrInvalidProfile)));
+        }"#,
+        );
+        assert_eq!(
+            gate.assess("upstream-code", &json!({})),
+            Some(Err(CapabilityFailure::MissingOrInvalidProfile))
+        );
     }
 
     #[test]
     fn shadow_mode_observes_but_caller_decides_whether_to_block() {
         let gate = CapabilitySettings::from_strings("shadow", PROFILES);
         assert_eq!(gate.mode, CapabilityMode::Observe);
-        assert_eq!(gate.assess("upstream-text", &json!({"tools":[{}]})),
-            Some(Err(CapabilityFailure::ToolsUnavailable)));
+        assert_eq!(
+            gate.assess("upstream-text", &json!({"tools":[{}]})),
+            Some(Err(CapabilityFailure::ToolsUnavailable))
+        );
     }
 }
