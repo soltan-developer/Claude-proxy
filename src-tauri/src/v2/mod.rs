@@ -4,7 +4,7 @@
 //! CI and against a real Claude Desktop. Migrate one boundary at a time.
 pub(crate) mod output_budget;
 pub(crate) mod request_shape;
-pub(crate) mod usage;
 pub(crate) mod tool_stream;
+pub(crate) mod usage;
 
 pub(crate) use request_shape::RequestShape;
