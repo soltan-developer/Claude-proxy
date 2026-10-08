@@ -69,6 +69,7 @@ fn test_server_state(provider_port: u16, mode: ContractMode) -> (ServerState, st
             active_requests: Arc::new(AtomicUsize::new(0)),
             v2_contract_mode: mode,
             v2_stream_enabled: false,
+            v2_capabilities: CapabilitySettings::from_strings("", ""),
         },
         dir,
     )

@@ -15,6 +15,8 @@ use std::{
 
 use crate::observability::{DiagnosticEntry, ObservabilityStore, UsageAggregate, UsageQuery};
 use crate::v2::preflight::{check_chat_completions, stream_enabled, ContractMode};
+use crate::v2::capabilities::{CapabilityMode, CapabilitySettings};
+use crate::v2::provider_response::validate_completion;
 use crate::v2::stream_machine::{StreamContractError, StreamMachine};
 use axum::{
     body::{Body, Bytes},
@@ -288,6 +290,7 @@ struct ServerState {
     active_requests: Arc<AtomicUsize>,
     v2_contract_mode: ContractMode,
     v2_stream_enabled: bool,
+    v2_capabilities: CapabilitySettings,
 }
 
 impl ServerState {
@@ -1288,6 +1291,10 @@ async fn start_proxy_inner(state: &BridgeState) -> Result<(), String> {
                 ),
                 &std::env::var("CLAUDE_PROXY_V2_STREAM").unwrap_or_default(),
             ),
+            v2_capabilities: CapabilitySettings::from_strings(
+                &std::env::var("CLAUDE_PROXY_V2_CAPABILITIES").unwrap_or_default(),
+                &std::env::var("CLAUDE_PROXY_V2_MODEL_CAPABILITIES").unwrap_or_default(),
+            ),
         })
         .layer(DefaultBodyLimit::max(25 * 1024 * 1024));
     let runtime_id = uuid::Uuid::new_v4();
@@ -1726,10 +1733,29 @@ async fn process_anthropic_messages(
         Err(error) => return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", &error),
     };
     let client_wants_stream = request.get("stream").and_then(Value::as_bool) == Some(true);
+    // V2 capability checks run on the fully translated payload, including
+    // client tools, historical tool results, and optional local gateway tools.
+    // They never guess from model names or silently degrade Code into chat.
     let web_intent = classify_web_intent(&request);
     let web_enabled = add_web_tools(&mut payload, &config, web_intent);
     let shell_enabled = add_shell_tool(&mut payload, &config);
     let local_tools_enabled = web_enabled || shell_enabled;
+    if let Some(result) = state.v2_capabilities.assess(&route.upstream_model, &payload) {
+        if let Err(failure) = result {
+            state.observability.log(
+                "warning",
+                "v2 capabilities",
+                &format!("Request {request_id}: unsupported provider capability {failure:?}."),
+            );
+            if state.v2_capabilities.mode == CapabilityMode::Enforce {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    failure.user_message(),
+                );
+            }
+        }
+    }
     if client_wants_stream && !local_tools_enabled {
         payload["stream_options"] = json!({ "include_usage": true });
     } else if local_tools_enabled {
@@ -1982,6 +2008,22 @@ async fn process_anthropic_messages(
                 );
             }
         };
+        // Check the complete provider response before the legacy mapper can
+        // invent tool IDs/names or swallow malformed JSON arguments.
+        if state.v2_contract_mode == ContractMode::Enforce {
+            if let Err(failure) = validate_completion(&value) {
+                state.observability.log(
+                    "error",
+                    "v2 provider response",
+                    &format!("Request {request_id}: invalid provider tool response ({failure:?})."),
+                );
+                return api_error(
+                    StatusCode::BAD_GATEWAY,
+                    "api_error",
+                    failure.user_message(),
+                );
+            }
+        }
         drop(upstream_permit);
         let upstream_elapsed_ms = upstream_started.elapsed().as_millis();
         state.observability.log(
@@ -2022,6 +2064,7 @@ async fn process_anthropic_messages(
                 _ => String::new(),
             };
             if finish == "length"
+                && state.v2_contract_mode != ContractMode::Enforce
                 && !message.get("tool_calls").is_some_and(Value::is_array)
                 && continuation_safe(&text)
             {
