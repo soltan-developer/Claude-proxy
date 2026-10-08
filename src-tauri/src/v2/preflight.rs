@@ -1,9 +1,9 @@
 //! Opt-in gateway contract preflight. No changes to legacy behavior in Off mode.
 //! Observe records only numeric request metadata. Enforce refuses potentially
 //! lossy requests *before* the legacy translator drops blocks.
-use serde_json::Value;
 use super::anthropic_contract::{validate_request, AdapterKind, ContractError};
 use super::request_shape::RequestShape;
+use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ContractMode {
@@ -73,7 +73,10 @@ mod tests {
         assert_eq!(ContractMode::from_setting(""), ContractMode::Off);
         assert_eq!(ContractMode::from_setting("yes"), ContractMode::Off);
         assert_eq!(ContractMode::from_setting("shadow"), ContractMode::Observe);
-        assert_eq!(ContractMode::from_setting(" ENFORCE "), ContractMode::Enforce);
+        assert_eq!(
+            ContractMode::from_setting(" ENFORCE "),
+            ContractMode::Enforce
+        );
     }
 
     #[test]

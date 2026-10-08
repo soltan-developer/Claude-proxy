@@ -12,7 +12,10 @@ async fn fake_provider(Json(payload): Json<Value>) -> Json<Value> {
     assert_eq!(model, "mock-upstream");
     let completion = if last["role"] == "tool" {
         assert_eq!(last["tool_call_id"], "call-readme-1");
-        assert_eq!(last["content"], "# Example project\nTwo modules need tests.");
+        assert_eq!(
+            last["content"],
+            "# Example project\nTwo modules need tests."
+        );
         json!({
             "id":"completion-final",
             "choices":[{"finish_reason":"stop","message":{
@@ -62,10 +65,7 @@ fn test_server_state(provider_port: u16, mode: ContractMode) -> (ServerState, st
             upstream_slots: Arc::new(Semaphore::new(2)),
             web_slots: Arc::new(Semaphore::new(2)),
             shell_slots: Arc::new(Semaphore::new(2)),
-            observability: ObservabilityStore::new(
-                dir.join("usage.jsonl"),
-                dir.join("logs.jsonl"),
-            ),
+            observability: ObservabilityStore::new(dir.join("usage.jsonl"), dir.join("logs.jsonl")),
             active_requests: Arc::new(AtomicUsize::new(0)),
             v2_contract_mode: mode,
         },
@@ -101,8 +101,13 @@ async fn real_http_gateway_preserves_two_turn_code_tool_loop() {
                  "input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}],
         "messages":[user]
     });
-    let first = client.post(&endpoint)
-        .bearer_auth("test-gateway-token").json(&request).send().await.unwrap();
+    let first = client
+        .post(&endpoint)
+        .bearer_auth("test-gateway-token")
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(first.status(), reqwest::StatusCode::OK);
     let first: Value = first.json().await.unwrap();
     assert_eq!(first["stop_reason"], "tool_use");
@@ -123,22 +128,35 @@ async fn real_http_gateway_preserves_two_turn_code_tool_loop() {
               "content":"# Example project\nTwo modules need tests."}]}
         ]
     });
-    let second = client.post(&endpoint).bearer_auth("test-gateway-token")
-        .json(&followup).send().await.unwrap();
+    let second = client
+        .post(&endpoint)
+        .bearer_auth("test-gateway-token")
+        .json(&followup)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(second.status(), reqwest::StatusCode::OK);
     let second: Value = second.json().await.unwrap();
     assert_eq!(second["stop_reason"], "end_turn");
-    assert!(second["content"][0]["text"].as_str().unwrap()
+    assert!(second["content"][0]["text"]
+        .as_str()
+        .unwrap()
         .contains("README.md"));
-    assert!(second["content"][0]["text"].as_str().unwrap()
+    assert!(second["content"][0]["text"]
+        .as_str()
+        .unwrap()
         .contains("two modules"));
 
     // Fail closed rather than silently dropping document context.
-    let rejected = client.post(&endpoint).bearer_auth("test-gateway-token")
+    let rejected = client
+        .post(&endpoint)
+        .bearer_auth("test-gateway-token")
         .json(&json!({"model":"claude-sonnet-5-5","messages":[{
             "role":"user","content":[{"type":"document","source":{"type":"base64",
             "media_type":"application/pdf","data":"secret"}}]}]}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(rejected.status(), reqwest::StatusCode::BAD_REQUEST);
     let error: Value = rejected.json().await.unwrap();
     assert_eq!(error["error"]["type"], "invalid_request_error");

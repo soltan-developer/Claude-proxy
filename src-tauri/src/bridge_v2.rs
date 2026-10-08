@@ -1680,10 +1680,7 @@ async fn process_anthropic_messages(
         state.observability.log(
             "info",
             "v2 preflight",
-            &format!(
-                "Request {request_id}: {}",
-                assessment.sanitized_summary(),
-            ),
+            &format!("Request {request_id}: {}", assessment.sanitized_summary(),),
         );
         if assessment.failed() {
             state.observability.log(
