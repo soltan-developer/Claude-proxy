@@ -4,6 +4,7 @@
 //! CI and against a real Claude Desktop. Migrate one boundary at a time.
 pub(crate) mod anthropic_contract;
 pub(crate) mod output_budget;
+pub(crate) mod preflight;
 pub(crate) mod request_shape;
 pub(crate) mod tool_stream;
 pub(crate) mod usage;

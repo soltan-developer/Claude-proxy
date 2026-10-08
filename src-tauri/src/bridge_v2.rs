@@ -14,6 +14,7 @@ use std::{
 };
 
 use crate::observability::{DiagnosticEntry, ObservabilityStore, UsageAggregate, UsageQuery};
+use crate::v2::preflight::{check_chat_completions, ContractMode};
 use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, State},
@@ -284,6 +285,7 @@ struct ServerState {
     shell_slots: Arc<Semaphore>,
     observability: ObservabilityStore,
     active_requests: Arc<AtomicUsize>,
+    v2_contract_mode: ContractMode,
 }
 
 impl ServerState {
@@ -1275,6 +1277,9 @@ async fn start_proxy_inner(state: &BridgeState) -> Result<(), String> {
             shell_slots: state.shell_slots.clone(),
             observability: state.observability.clone(),
             active_requests: state.active_requests.clone(),
+            v2_contract_mode: ContractMode::from_setting(
+                &std::env::var("CLAUDE_PROXY_V2_CONTRACTS").unwrap_or_default(),
+            ),
         })
         .layer(DefaultBodyLimit::max(25 * 1024 * 1024));
     let runtime_id = uuid::Uuid::new_v4();
@@ -1668,6 +1673,33 @@ async fn process_anthropic_messages(
             );
         }
     };
+    // OFF by default. Shadow observes request shape without storing prompts.
+    // ENFORCE rejects unsupported Anthropic blocks before legacy translation,
+    // so Code/Cowork cannot silently lose client tool or document context.
+    if let Some(assessment) = check_chat_completions(state.v2_contract_mode, &request) {
+        state.observability.log(
+            "info",
+            "v2 preflight",
+            &format!(
+                "Request {request_id}: {}",
+                assessment.sanitized_summary(),
+            ),
+        );
+        if assessment.failed() {
+            state.observability.log(
+                "warning",
+                "v2 compatibility",
+                &format!("Request {request_id}: unsupported client content detected."),
+            );
+            if state.v2_contract_mode == ContractMode::Enforce {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "V2 compatibility check: this request contains blocks not safely supported by the Chat Completions adapter. Select an eligible native Anthropic provider or disable this experimental adapter mode.",
+                );
+            }
+        }
+    }
     let requested_model = request
         .get("model")
         .and_then(Value::as_str)
@@ -5733,3 +5765,7 @@ mod tests {
         assert!(local_tool_calls(&client_tool).is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "v2/gateway_integration.rs"]
+mod v2_gateway_integration;
