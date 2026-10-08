@@ -52,7 +52,8 @@ impl HostPermissionGate {
         enable_shell: bool,
         enable_network: bool,
     ) -> Result<Self, PermissionError> {
-        let workspace_root = workspace_root.canonicalize()
+        let workspace_root = workspace_root
+            .canonicalize()
             .map_err(|_| PermissionError::OutOfScope)?;
         if !workspace_root.is_dir() {
             return Err(PermissionError::OutOfScope);
@@ -75,11 +76,14 @@ impl HostPermissionGate {
             return Err(PermissionError::TooManyPending);
         }
         let id = uuid::Uuid::new_v4().simple().to_string();
-        self.pending.insert(id.clone(), Pending {
-            intent,
-            expires: Instant::now() + self.ttl,
-            approved: false,
-        });
+        self.pending.insert(
+            id.clone(),
+            Pending {
+                intent,
+                expires: Instant::now() + self.ttl,
+                approved: false,
+            },
+        );
         Ok(id)
     }
 
@@ -124,12 +128,17 @@ impl HostPermissionGate {
         if intent.target.trim().is_empty() {
             return Err(PermissionError::OutOfScope);
         }
-        let directory = intent.working_directory.canonicalize()
+        let directory = intent
+            .working_directory
+            .canonicalize()
             .map_err(|_| PermissionError::OutOfScope)?;
         if !directory.starts_with(&self.workspace_root) {
             return Err(PermissionError::OutOfScope);
         }
-        if matches!(intent.action, HostAction::ReadWorkspace | HostAction::WriteWorkspace) {
+        if matches!(
+            intent.action,
+            HostAction::ReadWorkspace | HostAction::WriteWorkspace
+        ) {
             let name = Path::new(&intent.target);
             let full = if name.is_absolute() {
                 name.to_path_buf()
@@ -139,7 +148,8 @@ impl HostPermissionGate {
             // Reads must exist. For a new write, the existing parent must be
             // inside the workspace; for an existing write, resolve symlinks.
             let resolved = if full.exists() || intent.action == HostAction::ReadWorkspace {
-                full.canonicalize().map_err(|_| PermissionError::OutOfScope)?
+                full.canonicalize()
+                    .map_err(|_| PermissionError::OutOfScope)?
             } else {
                 full.parent()
                     .ok_or(PermissionError::OutOfScope)?
@@ -175,17 +185,20 @@ mod tests {
     #[test]
     fn shell_requires_both_enablement_and_explicit_approval() {
         let root = std::env::temp_dir();
-        let mut gate = HostPermissionGate::new(
-            root.clone(), Duration::from_secs(60), false, false,
-        ).unwrap();
-        assert_eq!(gate.propose(request(&root, HostAction::ExecuteShell)),
-            Err(PermissionError::Disabled));
-        let mut gate = HostPermissionGate::new(
-            root.clone(), Duration::from_secs(60), true, false,
-        ).unwrap();
+        let mut gate =
+            HostPermissionGate::new(root.clone(), Duration::from_secs(60), false, false).unwrap();
+        assert_eq!(
+            gate.propose(request(&root, HostAction::ExecuteShell)),
+            Err(PermissionError::Disabled)
+        );
+        let mut gate =
+            HostPermissionGate::new(root.clone(), Duration::from_secs(60), true, false).unwrap();
         let intent = request(&root, HostAction::ExecuteShell);
         let id = gate.propose(intent.clone()).unwrap();
-        assert_eq!(gate.consume(&id, &intent), Err(PermissionError::NotApproved));
+        assert_eq!(
+            gate.consume(&id, &intent),
+            Err(PermissionError::NotApproved)
+        );
         let id = gate.propose(intent.clone()).unwrap();
         gate.approve_from_host_ui(&id).unwrap();
         assert_eq!(gate.consume(&id, &intent), Ok(()));
@@ -195,37 +208,38 @@ mod tests {
     #[test]
     fn consent_cannot_be_replayed_for_modified_command() {
         let root = std::env::temp_dir();
-        let mut gate = HostPermissionGate::new(
-            root.clone(), Duration::from_secs(60), true, false,
-        ).unwrap();
+        let mut gate =
+            HostPermissionGate::new(root.clone(), Duration::from_secs(60), true, false).unwrap();
         let intent = request(&root, HostAction::ExecuteShell);
         let id = gate.propose(intent.clone()).unwrap();
         gate.approve_from_host_ui(&id).unwrap();
         let mut changed = intent.clone();
         changed.target = "different command".into();
-        assert_eq!(gate.consume(&id, &changed),
-            Err(PermissionError::MismatchedRequest));
+        assert_eq!(
+            gate.consume(&id, &changed),
+            Err(PermissionError::MismatchedRequest)
+        );
         assert_eq!(gate.consume(&id, &intent), Err(PermissionError::NotFound));
     }
 
     #[test]
     fn expired_grants_cannot_authorize_actions() {
         let root = std::env::temp_dir();
-        let mut gate = HostPermissionGate::new(
-            root.clone(), Duration::ZERO, true, false,
-        ).unwrap();
+        let mut gate = HostPermissionGate::new(root.clone(), Duration::ZERO, true, false).unwrap();
         let intent = request(&root, HostAction::ExecuteShell);
         let id = gate.propose(intent).unwrap();
-        assert_eq!(gate.approve_from_host_ui(&id), Err(PermissionError::Expired));
+        assert_eq!(
+            gate.approve_from_host_ui(&id),
+            Err(PermissionError::Expired)
+        );
     }
 
     #[test]
     fn workspace_read_cannot_escape_via_absolute_path() {
         let root = std::env::temp_dir();
         let parent = root.parent().unwrap().to_path_buf();
-        let mut gate = HostPermissionGate::new(
-            root.clone(), Duration::from_secs(60), false, false,
-        ).unwrap();
+        let mut gate =
+            HostPermissionGate::new(root.clone(), Duration::from_secs(60), false, false).unwrap();
         let mut intent = request(&root, HostAction::ReadWorkspace);
         intent.target = parent.to_string_lossy().to_string();
         assert_eq!(gate.propose(intent), Err(PermissionError::OutOfScope));
@@ -234,9 +248,8 @@ mod tests {
     #[test]
     fn writing_through_parent_directory_escape_is_denied() {
         let root = std::env::temp_dir();
-        let mut gate = HostPermissionGate::new(
-            root.clone(), Duration::from_secs(60), false, false,
-        ).unwrap();
+        let mut gate =
+            HostPermissionGate::new(root.clone(), Duration::from_secs(60), false, false).unwrap();
         let mut intent = request(&root, HostAction::WriteWorkspace);
         intent.target = "../outside-test-file.txt".into();
         assert_eq!(gate.propose(intent), Err(PermissionError::OutOfScope));
@@ -245,9 +258,8 @@ mod tests {
     #[test]
     fn no_host_network_access_by_default() {
         let root = std::env::temp_dir();
-        let mut gate = HostPermissionGate::new(
-            root.clone(), Duration::from_secs(60), false, false,
-        ).unwrap();
+        let mut gate =
+            HostPermissionGate::new(root.clone(), Duration::from_secs(60), false, false).unwrap();
         let mut intent = request(&root, HostAction::FetchPublicWeb);
         intent.target = "https://example.com".into();
         assert_eq!(gate.propose(intent), Err(PermissionError::Disabled));
