@@ -184,6 +184,14 @@ async fn streamed_mock_provider(Json(payload): Json<Value>) -> Response {
             {"index":0,"id":"broken-id","function":{"name":"Read","arguments":"{invalid"}}
         ]}}]})));
         chunks.push(frame(json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]})));
+    } else if requested == "disconnect" {
+        chunks.push(frame(json!({"choices":[{"delta":{"content":"partial only"}}]})));
+        // Deliberately close upstream without finish_reason or [DONE].
+        return (
+            [(header::CONTENT_TYPE, "text/event-stream")],
+            chunks.join(""),
+        )
+            .into_response();
     } else if requested == "over budget" {
         chunks.push(frame(json!({"choices":[{"delta":{"content":"text"},"finish_reason":"stop"}]})));
     } else if requested == "truncated" {
@@ -337,6 +345,17 @@ async fn v2_sse_http_length_remains_truncated_without_hidden_continuation() {
     let end = events.iter().find(|e| e["type"] == "message_delta").unwrap();
     assert_eq!(end["delta"]["stop_reason"], "max_tokens");
     assert!(events.iter().any(|e| e["type"] == "message_stop"));
+    upstream.abort();
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn v2_sse_http_upstream_disconnect_reports_error_instead_of_completion() {
+    let (endpoint, upstream, server, dir) = start_streaming_fixture().await;
+    let events = send_streaming_fixture(&endpoint, "disconnect", false).await;
+    assert!(events.iter().any(|e| e["type"] == "error"));
+    assert!(!events.iter().any(|e| e["type"] == "message_stop"));
     upstream.abort();
     server.abort();
     let _ = std::fs::remove_dir_all(dir);
