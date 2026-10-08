@@ -1854,7 +1854,9 @@ async fn process_anthropic_messages(
     // context adjustment, then enforced before *every* provider round.
     // Streaming needs V2 SSE because the legacy continuation path can
     // rewrite provider accounting and its stop reason.
-    if state.v2_output_guard_enabled && client_wants_stream && !local_tools_enabled
+    if state.v2_output_guard_enabled
+        && client_wants_stream
+        && !local_tools_enabled
         && !state.v2_stream_enabled
     {
         return api_error(
@@ -1869,15 +1871,20 @@ async fn process_anthropic_messages(
                 state.observability.log(
                     "info",
                     "v2 output budget",
-                    &format!("Request {request_id}: strict upstream output limit {} tokens.", guard.limit),
+                    &format!(
+                        "Request {request_id}: strict upstream output limit {} tokens.",
+                        guard.limit
+                    ),
                 );
                 Some(guard)
             }
-            Err(failure) => return api_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                failure.user_message(),
-            ),
+            Err(failure) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    failure.user_message(),
+                )
+            }
         }
     } else {
         None
@@ -2073,19 +2080,17 @@ async fn process_anthropic_messages(
         // Never forward an over-limit or unmeasured strict-mode response.
         // This also covers the nonstream local tool loop before execution.
         if let Some(guard) = v2_output_guard {
-            let measured = parse_provider_usage(value.get("usage").unwrap_or(&Value::Null))
-                .output_tokens;
+            let measured =
+                parse_provider_usage(value.get("usage").unwrap_or(&Value::Null)).output_tokens;
             if let Err(failure) = guard.verify_reported_output(measured) {
                 state.observability.log(
                     "error",
                     "v2 output budget",
-                    &format!("Request {request_id}: provider output validation failed ({failure:?})."),
+                    &format!(
+                        "Request {request_id}: provider output validation failed ({failure:?})."
+                    ),
                 );
-                return api_error(
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
-                    failure.user_message(),
-                );
+                return api_error(StatusCode::BAD_GATEWAY, "api_error", failure.user_message());
             }
         }
         // Check the complete provider response before the legacy mapper can

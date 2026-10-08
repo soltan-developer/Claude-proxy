@@ -344,27 +344,36 @@ fn truncate(value: &str, max_chars: usize) -> String {
     text
 }
 
-
 #[cfg(test)]
 mod v2_coverage_tests {
     use super::*;
 
     #[test]
     fn cache_reads_and_writes_have_independent_reporting_coverage() {
-        let dir = std::env::temp_dir()
-            .join(format!("qbs2-usage-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("qbs2-usage-test-{}", uuid::Uuid::new_v4()));
         let store = ObservabilityStore::new(dir.join("usage.jsonl"), dir.join("logs.jsonl"));
-        store.record_usage("mock", "model", "route", 100, 12, 0, 5, 100,
-            true, false, true, false, false).unwrap();
-        store.record_usage("mock", "model", "route", 100, 12, 0, 0, 0,
-            false, false, false, false, false).unwrap();
-        store.record_usage("mock", "model", "route", 100, 12, 0, 0, 100,
-            true, true, false, false, false).unwrap();
-        let aggregate = store.usage(UsageQuery {
-            start_timestamp: unix_time().saturating_sub(10),
-            end_timestamp: unix_time().saturating_add(10),
-            utc_offset_minutes: 0,
-        }).unwrap();
+        store
+            .record_usage(
+                "mock", "model", "route", 100, 12, 0, 5, 100, true, false, true, false, false,
+            )
+            .unwrap();
+        store
+            .record_usage(
+                "mock", "model", "route", 100, 12, 0, 0, 0, false, false, false, false, false,
+            )
+            .unwrap();
+        store
+            .record_usage(
+                "mock", "model", "route", 100, 12, 0, 0, 100, true, true, false, false, false,
+            )
+            .unwrap();
+        let aggregate = store
+            .usage(UsageQuery {
+                start_timestamp: unix_time().saturating_sub(10),
+                end_timestamp: unix_time().saturating_add(10),
+                utc_offset_minutes: 0,
+            })
+            .unwrap();
         assert_eq!(aggregate.len(), 1);
         assert_eq!(aggregate[0].requests, 3);
         assert_eq!(aggregate[0].cache_stats_reported_requests, 2);
@@ -379,7 +388,8 @@ mod v2_coverage_tests {
             "timestamp":1,"provider":"mock","model":"x","requestedModel":"alias",
             "inputTokens":100,"outputTokens":10,"cachedInputTokens":0,
             "cacheStatsReported":true,"inputEstimated":false,"outputEstimated":false
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(record.cache_read_reported, None);
         assert_eq!(record.cache_write_reported, None);
     }

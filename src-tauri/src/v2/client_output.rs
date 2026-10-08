@@ -39,7 +39,9 @@ impl ClientOutputGuard {
         upstream_payload: &Value,
         route_output_limit: u64,
     ) -> Result<Self, OutputGuardError> {
-        let requested = request.get("max_tokens").and_then(Value::as_u64)
+        let requested = request
+            .get("max_tokens")
+            .and_then(Value::as_u64)
             .filter(|v| *v > 0)
             .ok_or(OutputGuardError::MissingOrInvalidClientLimit)?;
         let mut limit = requested.min(DESKTOP_HARD_CAP);
@@ -47,7 +49,8 @@ impl ClientOutputGuard {
             limit = limit.min(route_output_limit);
         }
         if let Some(already_capped) = upstream_payload.get("max_tokens") {
-            let value = already_capped.as_u64()
+            let value = already_capped
+                .as_u64()
                 .filter(|n| *n > 0)
                 .ok_or(OutputGuardError::InvalidProviderBudget)?;
             limit = limit.min(value);
@@ -61,15 +64,18 @@ impl ClientOutputGuard {
     /// Called directly before every provider call, not only the first one.
     /// Tool / retry code may otherwise enlarge the output after negotiation.
     pub(crate) fn apply(self, payload: &mut Value) {
-        let budget = payload.get("max_tokens").and_then(Value::as_u64)
+        let budget = payload
+            .get("max_tokens")
+            .and_then(Value::as_u64)
             .filter(|value| *value > 0)
             .map_or(self.limit, |value| value.min(self.limit));
         payload["max_tokens"] = json!(budget);
     }
 
-    pub(crate) fn verify_reported_output(self, measured: Option<u64>)
-        -> Result<(), OutputGuardError>
-    {
+    pub(crate) fn verify_reported_output(
+        self,
+        measured: Option<u64>,
+    ) -> Result<(), OutputGuardError> {
         let actual = measured.ok_or(OutputGuardError::MissingProviderUsage)?;
         if actual > self.limit {
             return Err(OutputGuardError::ProviderExceededBudget);
@@ -97,7 +103,8 @@ mod tests {
             &json!({"max_tokens":64_000}),
             &json!({"max_tokens":64_000}),
             128_000,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(guard.limit, DESKTOP_HARD_CAP);
         let mut provider = json!({"max_tokens":64_000});
         guard.apply(&mut provider);
@@ -107,8 +114,11 @@ mod tests {
     #[test]
     fn a_small_client_budget_is_respected() {
         let guard = ClientOutputGuard::negotiate(
-            &json!({"max_tokens":512}), &json!({"max_tokens":256}), 4096,
-        ).unwrap();
+            &json!({"max_tokens":512}),
+            &json!({"max_tokens":256}),
+            4096,
+        )
+        .unwrap();
         assert_eq!(guard.limit, 256);
         let mut next = json!({"max_tokens":40_000});
         guard.apply(&mut next);
@@ -117,28 +127,35 @@ mod tests {
 
     #[test]
     fn an_unreported_provider_count_is_not_verified_as_zero() {
-        let guard = ClientOutputGuard { limit:32_000 };
-        assert_eq!(guard.verify_reported_output(None),
-            Err(OutputGuardError::MissingProviderUsage));
-        assert_eq!(guard.verify_reported_output(Some(32_001)),
-            Err(OutputGuardError::ProviderExceededBudget));
+        let guard = ClientOutputGuard { limit: 32_000 };
+        assert_eq!(
+            guard.verify_reported_output(None),
+            Err(OutputGuardError::MissingProviderUsage)
+        );
+        assert_eq!(
+            guard.verify_reported_output(Some(32_001)),
+            Err(OutputGuardError::ProviderExceededBudget)
+        );
         assert_eq!(guard.verify_reported_output(Some(32_000)), Ok(()));
     }
 
     #[test]
     fn invalid_client_request_fails_instead_of_guessing() {
-        assert_eq!(ClientOutputGuard::negotiate(
-            &json!({}), &json!({}), 0,
-        ), Err(OutputGuardError::MissingOrInvalidClientLimit));
-        assert_eq!(ClientOutputGuard::negotiate(
-            &json!({"max_tokens":0}), &json!({}), 0,
-        ), Err(OutputGuardError::MissingOrInvalidClientLimit));
+        assert_eq!(
+            ClientOutputGuard::negotiate(&json!({}), &json!({}), 0,),
+            Err(OutputGuardError::MissingOrInvalidClientLimit)
+        );
+        assert_eq!(
+            ClientOutputGuard::negotiate(&json!({"max_tokens":0}), &json!({}), 0,),
+            Err(OutputGuardError::MissingOrInvalidClientLimit)
+        );
     }
 
     #[test]
     fn invalid_provider_max_tokens_never_turns_into_one_token() {
-        assert_eq!(ClientOutputGuard::negotiate(
-            &json!({"max_tokens":1024}), &json!({"max_tokens":0}), 0,
-        ), Err(OutputGuardError::InvalidProviderBudget));
+        assert_eq!(
+            ClientOutputGuard::negotiate(&json!({"max_tokens":1024}), &json!({"max_tokens":0}), 0,),
+            Err(OutputGuardError::InvalidProviderBudget)
+        );
     }
 }
