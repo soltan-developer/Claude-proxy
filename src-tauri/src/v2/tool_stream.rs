@@ -87,9 +87,9 @@ mod tests {
     fn delayed_metadata_still_reconstructs_exact_tool_identity() {
         let mut acc=ToolCallAccumulator::default();
         acc.push_chunk(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,
-            "function":{"arguments":"{\\\"path\\\":"}}]}}]})).unwrap();
+            "function":{"arguments":r#"{"path":"#}}]}}]})).unwrap();
         acc.push_chunk(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,
-            "id":"call-123","function":{"name":"Read","arguments":"\\\"src\\\"}"}}]}}]})).unwrap();
+            "id":"call-123","function":{"name":"Read","arguments":r#""src"}"#}}]}}]})).unwrap();
         assert_eq!(acc.complete().unwrap(), vec![CompletedToolCall {
             id:"call-123".into(),name:"Read".into(),arguments:json!({"path":"src"})
         }]);
