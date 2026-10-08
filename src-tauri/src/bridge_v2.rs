@@ -1579,8 +1579,7 @@ async fn anthropic_messages(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let should_keep_stream_alive =
-        needs_stream_heartbeat(&body, &state.config.read().await);
+    let should_keep_stream_alive = needs_stream_heartbeat(&body, &state.config.read().await);
     let mut processing = Box::pin(process_anthropic_messages(state, headers, body));
     if !should_keep_stream_alive {
         return processing.await;
@@ -5767,9 +5766,17 @@ mod tests {
             settings["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"],
             "claude-fable-5-1"
         );
-        assert!(settings["env"].get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_none());
-        assert_eq!(settings["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:19191");
-        assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "unit-test-gateway-token");
+        assert!(settings["env"]
+            .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+            .is_none());
+        assert_eq!(
+            settings["env"]["ANTHROPIC_BASE_URL"],
+            "http://127.0.0.1:19191"
+        );
+        assert_eq!(
+            settings["env"]["ANTHROPIC_AUTH_TOKEN"],
+            "unit-test-gateway-token"
+        );
         assert_eq!(settings["env"]["CUSTOM_USER_VALUE"], "preserve-me");
         assert_eq!(settings["permissions"]["allow"][0], "Bash(git status)");
     }
@@ -5788,5 +5795,4 @@ mod tests {
         config.web_access_mode = "auto".into();
         assert!(needs_stream_heartbeat(br#"{"stream":true}"#, &config));
     }
-
 }
