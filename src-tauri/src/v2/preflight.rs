@@ -22,6 +22,12 @@ impl ContractMode {
     }
 }
 
+// Stream translation is experimental: both strict request validation and
+// the separate stream flag must be explicitly enabled.
+pub(crate) fn stream_enabled(mode: ContractMode, setting: &str) -> bool {
+    mode == ContractMode::Enforce && setting.trim().eq_ignore_ascii_case("on")
+}
+
 pub(crate) struct ContractAssessment {
     pub(crate) shape: RequestShape,
     pub(crate) error: Option<ContractError>,
@@ -77,6 +83,15 @@ mod tests {
             ContractMode::from_setting(" ENFORCE "),
             ContractMode::Enforce
         );
+    }
+
+    #[test]
+    fn strict_stream_requires_two_explicit_opt_ins() {
+        assert!(!stream_enabled(ContractMode::Off, "on"));
+        assert!(!stream_enabled(ContractMode::Observe, "on"));
+        assert!(!stream_enabled(ContractMode::Enforce, "off"));
+        assert!(!stream_enabled(ContractMode::Enforce, ""));
+        assert!(stream_enabled(ContractMode::Enforce, " ON "));
     }
 
     #[test]
