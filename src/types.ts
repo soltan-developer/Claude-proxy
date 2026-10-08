@@ -62,6 +62,8 @@ export type UsageAggregate = {
     cacheWriteInputTokens: number;
     cacheStatsInputTokens: number;
     cacheStatsReportedRequests: number;
+    cacheReadReportedRequests?: number;
+    cacheWriteReportedRequests?: number;
   requests: number;
   estimatedInputRequests: number;
   estimatedOutputRequests: number;

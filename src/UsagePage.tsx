@@ -126,21 +126,25 @@ export function UsagePage({ isTauri, language, config }: { isTauri: boolean; lan
     cacheWriteInput: sum.cacheWriteInput + row.cacheWriteInputTokens,
     cacheStatsInput: sum.cacheStatsInput + row.cacheStatsInputTokens,
     cacheStatsRequests: sum.cacheStatsRequests + row.cacheStatsReportedRequests,
+    cacheReadReportedRequests: sum.cacheReadReportedRequests + (row.cacheReadReportedRequests ?? 0),
+    cacheWriteReportedRequests: sum.cacheWriteReportedRequests + (row.cacheWriteReportedRequests ?? 0),
     requests: sum.requests + row.requests,
     estimatedInput: sum.estimatedInput + row.estimatedInputRequests,
     estimatedOutput: sum.estimatedOutput + row.estimatedOutputRequests,
-  }), { input: 0, output: 0, cachedInput: 0, cacheWriteInput: 0, cacheStatsInput: 0, cacheStatsRequests: 0, requests: 0, estimatedInput: 0, estimatedOutput: 0 }), [visibleRows]);
+  }), { input: 0, output: 0, cachedInput: 0, cacheWriteInput: 0, cacheStatsInput: 0, cacheStatsRequests: 0, cacheReadReportedRequests: 0, cacheWriteReportedRequests: 0, requests: 0, estimatedInput: 0, estimatedOutput: 0 }), [visibleRows]);
   const modelTotals = useMemo(() => {
-    const grouped = new Map<string, { provider: string; model: string; requestedModel: string; input: number; output: number; cachedInput: number; cacheWriteInput: number; cacheStatsRequests: number; requests: number; estimated: number }>();
+    const grouped = new Map<string, { provider: string; model: string; requestedModel: string; input: number; output: number; cachedInput: number; cacheWriteInput: number; cacheStatsRequests: number; cacheReadReportedRequests: number; cacheWriteReportedRequests: number; requests: number; estimated: number }>();
     for (const row of visibleRows) {
       const provider = row.provider || "Unknown provider";
       const key = `${provider}\u0000${row.model}\u0000${row.requestedModel}`;
-      const entry = grouped.get(key) ?? { provider, model: row.model, requestedModel: row.requestedModel, input: 0, output: 0, cachedInput: 0, cacheWriteInput: 0, cacheStatsRequests: 0, requests: 0, estimated: 0 };
+      const entry = grouped.get(key) ?? { provider, model: row.model, requestedModel: row.requestedModel, input: 0, output: 0, cachedInput: 0, cacheWriteInput: 0, cacheStatsRequests: 0, cacheReadReportedRequests: 0, cacheWriteReportedRequests: 0, requests: 0, estimated: 0 };
       entry.input += row.inputTokens;
       entry.output += row.outputTokens;
       entry.cachedInput += row.cachedInputTokens;
       entry.cacheWriteInput += row.cacheWriteInputTokens;
       entry.cacheStatsRequests += row.cacheStatsReportedRequests;
+      entry.cacheReadReportedRequests += row.cacheReadReportedRequests ?? 0;
+      entry.cacheWriteReportedRequests += row.cacheWriteReportedRequests ?? 0;
       entry.requests += row.requests;
       entry.estimated += row.estimatedInputRequests + row.estimatedOutputRequests;
       grouped.set(key, entry);
@@ -196,10 +200,10 @@ export function UsagePage({ isTauri, language, config }: { isTauri: boolean; lan
     <section className="usage-metric-grid" aria-label="Usage totals">
       <Metric label="Input tokens" value={totals.input} detail={totals.estimatedInput ? `${formatNumber(totals.estimatedInput, language)} request estimates` : "Provider usage"} language={language} />
       <Metric label="Output tokens" value={totals.output} detail={totals.estimatedOutput ? `${formatNumber(totals.estimatedOutput, language)} request estimates` : "Generated response tokens"} language={language} />
-      <CacheSummaryMetric read={totals.cachedInput} created={totals.cacheWriteInput} cacheStatsInput={totals.cacheStatsInput} reportedRequests={totals.cacheStatsRequests} requests={totals.requests} language={language} />
+      <CacheSummaryMetric read={totals.cachedInput} created={totals.cacheWriteInput} cacheStatsInput={totals.cacheStatsInput} readReportedRequests={totals.cacheReadReportedRequests} writeReportedRequests={totals.cacheWriteReportedRequests} requests={totals.requests} language={language} />
       <Metric label="Models used" value={new Set(visibleRows.map((row) => `${row.provider}\u0000${row.model}`)).size} detail={lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString(localeFor(language), { hour: "numeric", minute: "2-digit" })}` : "Waiting for usage"} language={language} />
     </section>
-    <p className="usage-cache-definition">Input excludes cache tokens when the provider reports them; unknown cache stays in input. Cache combines reads and creation. Output is generated separately.</p>
+    <p className="usage-cache-definition">Only provider-reported cache values are counted. A missing cache read/write statistic is unknown, not zero; partial coverage is labeled below. Input and output counts may include estimates.</p>
 
     <section className="usage-chart-card card" aria-labelledby="usage-chart-title">
       <div className="usage-section-heading"><div><h2 id="usage-chart-title">{granularity === "daily" ? "Daily usage" : "Monthly usage"}</h2><p>{grouping === "total" ? "Input, cache, and output token totals" : "Token totals for each provider model"}</p></div><span className="status-pill">{loading ? "Updating" : `${formatNumber(totals.requests, language)} requests`}</span></div>
@@ -213,7 +217,7 @@ export function UsagePage({ isTauri, language, config }: { isTauri: boolean; lan
     <section className="usage-breakdown card" aria-labelledby="usage-breakdown-title">
       <div className="usage-section-heading"><div><h2 id="usage-breakdown-title">Model breakdown</h2><p>Input and output by provider model; cache read and creation are separate when reported.</p></div></div>
       {modelTotals.length ? <div className="usage-table-wrap"><table className="usage-table"><thead><tr><th scope="col">Provider</th><th scope="col">Provider model</th><th scope="col">Claude route</th><th scope="col" className="usage-number">Requests</th><th scope="col" className="usage-number">Input tokens</th><th scope="col" className="usage-number">Output tokens</th><th scope="col" className="usage-number">Cache read</th><th scope="col" className="usage-number">Cache creation</th><th scope="col">Source</th></tr></thead><tbody>
-        {modelTotals.map((item) => <tr key={`${item.provider}-${item.model}-${item.requestedModel}`}><td><span className="technical-value" dir="auto">{item.provider}</span></td><td><span className="technical-value" dir="auto">{item.model}</span></td><td><span className="technical-value" dir="auto">{item.requestedModel}</span></td><td className="usage-number">{formatNumber(item.requests, language)}</td><td className="usage-number">{formatNumber(Math.max(0, item.input - item.cachedInput - item.cacheWriteInput), language)}</td><td className="usage-number">{formatNumber(item.output, language)}</td><td className="usage-number" title={`${formatNumber(item.cacheStatsRequests, language)} / ${formatNumber(item.requests, language)} requests reported cache details`}>{item.cacheStatsRequests ? formatNumber(item.cachedInput, language) : "—"}</td><td className="usage-number">{item.cacheStatsRequests ? formatNumber(item.cacheWriteInput, language) : "—"}</td><td><span className="usage-source-badge">{item.estimated ? "Includes estimates" : "Provider reported"}</span></td></tr>)}
+        {modelTotals.map((item) => <tr key={`${item.provider}-${item.model}-${item.requestedModel}`}><td><span className="technical-value" dir="auto">{item.provider}</span></td><td><span className="technical-value" dir="auto">{item.model}</span></td><td><span className="technical-value" dir="auto">{item.requestedModel}</span></td><td className="usage-number">{formatNumber(item.requests, language)}</td><td className="usage-number">{formatNumber(Math.max(0, item.input - item.cachedInput - item.cacheWriteInput), language)}</td><td className="usage-number">{formatNumber(item.output, language)}</td><td className="usage-number" title={`${formatNumber(item.cacheReadReportedRequests, language)} / ${formatNumber(item.requests, language)} requests reported cache READ values`}>{item.cacheReadReportedRequests ? `${formatNumber(item.cachedInput, language)}${item.cacheReadReportedRequests < item.requests ? " *" : ""}` : "—"}</td><td className="usage-number" title={`${formatNumber(item.cacheWriteReportedRequests, language)} / ${formatNumber(item.requests, language)} requests reported cache WRITE values`}>{item.cacheWriteReportedRequests ? `${formatNumber(item.cacheWriteInput, language)}${item.cacheWriteReportedRequests < item.requests ? " *" : ""}` : "—"}</td><td><span className="usage-source-badge">{item.estimated ? "Includes estimates" : item.cacheReadReportedRequests < item.requests || item.cacheWriteReportedRequests < item.requests ? "Partial cache data" : "Provider reported"}</span></td></tr>)}
       </tbody></table></div> : <div className="usage-table-empty"><span className="empty-glyph" aria-hidden="true">⌁</span><strong>No successful requests recorded for this range.</strong><p>Try a wider date range or reset the provider and model filters.</p><button className="button button-secondary" type="button" onClick={resetUsageView}>Show the last 30 days</button></div>}
     </section>
     <p className="diagnostics-note">The local history stores timestamps, provider names, model IDs, token totals, provider-reported cache counts, and estimate flags. It never stores prompts, completions, API keys, or provider response bodies.</p>
@@ -224,14 +228,21 @@ function Metric({ label, value, detail, language }: { label: string; value: numb
   return <article className="usage-metric"><span className="usage-metric-label">{label}</span><strong>{formatNumber(value, language)}</strong><small>{detail}</small></article>;
 }
 
-function CacheSummaryMetric({ read, created, cacheStatsInput, reportedRequests, requests, language }: { read: number; created: number; cacheStatsInput: number; reportedRequests: number; requests: number; language: Language }) {
-  const hasCacheData = reportedRequests > 0;
-  const cacheHitRate = cacheStatsInput > 0 ? Math.min(100, (read / cacheStatsInput) * 100) : null;
+function CacheSummaryMetric({ read, created, cacheStatsInput, readReportedRequests, writeReportedRequests, requests, language }: { read: number; created: number; cacheStatsInput: number; readReportedRequests: number; writeReportedRequests: number; requests: number; language: Language }) {
+  const hasCacheData = readReportedRequests > 0 || writeReportedRequests > 0;
+  const completeCoverage = requests > 0 && readReportedRequests === requests && writeReportedRequests === requests;
+  const cacheHitRate = completeCoverage && cacheStatsInput > 0 ? Math.min(100, (read / cacheStatsInput) * 100) : null;
   return <article className="usage-metric usage-cache-summary">
-    <span className="usage-metric-label">Cache tokens</span>
-    <strong>{hasCacheData ? formatNumber(read + created, language) : "—"}</strong>
-    {hasCacheData ? <div className="usage-cache-parts"><small><span>Cache read</span> {formatNumber(read, language)}</small><small><span>Cache creation</span> {formatNumber(created, language)}</small><small><span>Hit rate</span> {cacheHitRate === null ? "—" : `${cacheHitRate.toLocaleString(localeFor(language), { maximumFractionDigits: 1 })}%`}</small></div> : <small>Not reported by provider</small>}
-    {hasCacheData && reportedRequests < requests && <small>{formatNumber(reportedRequests, language)} / {formatNumber(requests, language)} requests reported cache usage</small>}
+    <span className="usage-metric-label">Reported cache tokens</span>
+    <strong>{hasCacheData ? `${formatNumber(read + created, language)}${completeCoverage ? "" : " *"}` : "—"}</strong>
+    {hasCacheData ? <div className="usage-cache-parts">
+      <small><span>Cache read</span> {readReportedRequests ? formatNumber(read, language) : "Not reported"}</small>
+      <small><span>Cache creation</span> {writeReportedRequests ? formatNumber(created, language) : "Not reported"}</small>
+      <small><span>Hit rate</span> {cacheHitRate === null ? "—" : `${cacheHitRate.toLocaleString(localeFor(language), { maximumFractionDigits: 1 })}%`}</small>
+    </div> : <small>Not reported by provider</small>}
+    {!completeCoverage && requests > 0 && <small>
+      * Incomplete coverage: reads {formatNumber(readReportedRequests, language)}/{formatNumber(requests, language)} requests; writes {formatNumber(writeReportedRequests, language)}/{formatNumber(requests, language)}. Missing values are unknown.
+    </small>}
   </article>;
 }
 
