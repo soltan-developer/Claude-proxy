@@ -2990,7 +2990,7 @@ fn build_web_client(config: &AppConfig) -> Result<Client, String> {
         .read_timeout(Duration::from_secs(45))
         .pool_idle_timeout(Duration::from_secs(30))
         .redirect(Policy::none())
-        .user_agent("Claude-Proxy-WebBridge/2.0.8");
+        .user_agent("Claude-Proxy-WebBridge/2.0.9");
     if config.web_proxy_mode == "manual" {
         let proxy_url = normalize_web_proxy_url(&config.web_proxy_url)?;
         if proxy_url.is_empty() {
