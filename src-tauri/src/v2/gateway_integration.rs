@@ -61,6 +61,7 @@ fn test_server_state(provider_port: u16, mode: ContractMode) -> (ServerState, st
         ServerState {
             config: Arc::new(RwLock::new(config)),
             upstream_clients: Arc::new(vec![client]),
+            direct_provider_client: build_direct_provider_client().unwrap(),
             upstream_cursor: Arc::new(AtomicUsize::new(0)),
             upstream_slots: Arc::new(Semaphore::new(2)),
             web_slots: Arc::new(Semaphore::new(2)),
@@ -938,4 +939,105 @@ async fn real_http_client_read_is_not_hijacked_by_required_web_or_host_shell() {
     server.abort();
     upstream.abort();
     let _ = std::fs::remove_dir_all(dir);
+}
+
+
+async fn provider_recovery_echo(Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
+    // Successful local mock represents upstream response *after* direct failover.
+    (StatusCode::OK, Json(json!({
+        "choices":[{"message":{"role":"assistant","content":body["marker"]},"finish_reason":"stop"}],
+        "usage":{"prompt_tokens":1,"completion_tokens":2}
+    })))
+}
+
+#[tokio::test]
+async fn broken_system_proxy_falls_back_to_direct_and_preserves_post_body() {
+    let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = provider.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(provider, Router::new().route("/v1/chat/completions", post(provider_recovery_echo)))
+            .await.unwrap();
+    });
+    let disconnected = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bad_port = disconnected.local_addr().unwrap().port();
+    drop(disconnected);
+
+    let system = Client::builder()
+        .proxy(Proxy::all(format!("http://127.0.0.1:{bad_port}")).unwrap())
+        .build().unwrap();
+    let direct = build_direct_provider_client().unwrap();
+    let dir = std::env::temp_dir().join(format!("claude-proxy-recovery-{}", uuid::Uuid::new_v4()));
+    let diagnostics = ObservabilityStore::new(dir.join("usage.jsonl"), dir.join("diag.jsonl"));
+    let response = send_provider_with_mode(
+        system.post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .json(&json!({"marker":"FA-527","stream":false})),
+        &direct,
+        &diagnostics,
+        ProviderProxyMode::Auto,
+    ).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["choices"][0]["message"]["content"], "FA-527");
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn explicit_system_proxy_mode_never_bypasses_a_broken_proxy() {
+    let disconnected = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bad_port = disconnected.local_addr().unwrap().port();
+    drop(disconnected);
+    let system = Client::builder()
+        .proxy(Proxy::all(format!("http://127.0.0.1:{bad_port}")).unwrap())
+        .build().unwrap();
+    let direct = build_direct_provider_client().unwrap();
+    let dir = std::env::temp_dir().join(format!("claude-proxy-strict-system-{}", uuid::Uuid::new_v4()));
+    let diagnostics = ObservabilityStore::new(dir.join("usage.jsonl"), dir.join("diag.jsonl"));
+    let result = send_provider_with_mode(
+        system.get("http://127.0.0.1:18183/healthz"),
+        &direct,
+        &diagnostics,
+        ProviderProxyMode::System,
+    ).await;
+    assert!(result.is_err());
+    serverless_cleanup(&dir);
+}
+
+fn serverless_cleanup(dir: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+async fn provider_http_failure_mock() -> StatusCode {
+    StatusCode::UNAUTHORIZED
+}
+
+#[tokio::test]
+async fn provider_http_failure_is_not_replayed_as_direct_retry() {
+    let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = provider.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(provider, Router::new().route("/v1/models", get(provider_http_failure_mock)))
+            .await.unwrap();
+    });
+    let system = Client::new();
+    let direct = build_direct_provider_client().unwrap();
+    let dir = std::env::temp_dir().join(format!("claude-proxy-no-http-retry-{}", uuid::Uuid::new_v4()));
+    let diagnostics = ObservabilityStore::new(dir.join("usage.jsonl"), dir.join("diag.jsonl"));
+    let response = send_provider_with_mode(
+        system.get(format!("http://127.0.0.1:{port}/v1/models")),
+        &direct,
+        &diagnostics,
+        ProviderProxyMode::Auto,
+    ).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    server.abort();
+    serverless_cleanup(&dir);
+}
+
+#[test]
+fn provider_proxy_mode_defaults_auto_and_supports_safe_opt_out() {
+    assert_eq!(ProviderProxyMode::from_setting(""), ProviderProxyMode::Auto);
+    assert_eq!(ProviderProxyMode::from_setting("bad"), ProviderProxyMode::Auto);
+    assert_eq!(ProviderProxyMode::from_setting("SYSTEM"), ProviderProxyMode::System);
+    assert_eq!(ProviderProxyMode::from_setting(" direct "), ProviderProxyMode::Direct);
 }
