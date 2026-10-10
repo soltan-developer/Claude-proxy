@@ -622,6 +622,18 @@ fn asks_for_fresh_information(text: &str) -> bool {
     .any(|term| text.contains(term))
 }
 
+// In strict V2, Claude Code and Cowork own execution of their declared
+// client-side tools (Read, Bash, AskUserQuestion, etc.). An injected local
+// web/shell bridge or a forced tool_choice can steal their next action.
+// The built-in bridge remains available for tool-less clients.
+fn client_tools_take_precedence(mode: ContractMode, request: &Value) -> bool {
+    mode == ContractMode::Enforce
+        && request
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(|tools| !tools.is_empty())
+}
+
 fn classify_web_intent(request: &Value) -> WebIntent {
     let Some(messages) = request.get("messages").and_then(Value::as_array) else {
         return WebIntent::Automatic;
@@ -1762,7 +1774,12 @@ async fn process_anthropic_messages(
     // V2 capability checks run on the fully translated payload, including
     // client tools, historical tool results, and optional local gateway tools.
     // They never guess from model names or silently degrade Code into chat.
-    let web_intent = classify_web_intent(&request);
+    let client_tools_owned = client_tools_take_precedence(state.v2_contract_mode, &request);
+    let web_intent = if client_tools_owned {
+        WebIntent::NoWeb
+    } else {
+        classify_web_intent(&request)
+    };
     // Store only routing decisions and counts. Never log the current prompt,
     // previous messages, tool arguments, account secrets or file paths.
     if state.v2_contract_mode != ContractMode::Off {
@@ -1770,14 +1787,18 @@ async fn process_anthropic_messages(
             "info",
             "v2 tool routing",
             &format!(
-                "Request {request_id}: web_intent={web_intent:?}, client_tool_definitions={}, client_message_count={}.",
+                "Request {request_id}: web_intent={web_intent:?}, client_tools_owned={client_tools_owned}, client_tool_definitions={}, client_message_count={}.",
                 request.get("tools").and_then(Value::as_array).map_or(0, Vec::len),
                 request.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
             ),
         );
     }
     let web_enabled = add_web_tools(&mut payload, &config, web_intent);
-    let shell_enabled = add_shell_tool(&mut payload, &config);
+    let shell_enabled = if client_tools_owned {
+        false
+    } else {
+        add_shell_tool(&mut payload, &config)
+    };
     let local_tools_enabled = web_enabled || shell_enabled;
     if let Some(result) = state
         .v2_capabilities
@@ -6027,6 +6048,42 @@ mod tests {
             { "role": "user", "content": "نظرت چیه؟" }
         ] });
         assert_eq!(classify_web_intent(&request2), WebIntent::ReuseContext);
+    }
+
+    #[test]
+    fn strict_v2_preserves_client_tool_ownership_even_for_github_tasks() {
+        let request = json!({
+            "model": "claude-sonnet-5-5",
+            "messages": [{"role":"user","content":"Read my local GitHub repo"}],
+            "tools": [{"name":"Read","input_schema":{"type":"object"}}]
+        });
+        assert!(client_tools_take_precedence(ContractMode::Enforce, &request));
+        assert!(!client_tools_take_precedence(ContractMode::Off, &request));
+
+        let mut config = AppConfig::default();
+        config.web_access_mode = "required".into();
+        config.shell_access_mode = "auto".into();
+        let mut payload = anthropic_to_openai(
+            &request,
+            &ModelRoute {
+                route_id: "claude-sonnet-5-5".into(),
+                display_name: "Test".into(),
+                upstream_model: "mock-upstream".into(),
+                tier: "sonnet".into(),
+                context_window: 128_000,
+                max_output_tokens: 4_096,
+                is_default: true,
+            },
+        ).unwrap();
+        let web_intent = if client_tools_take_precedence(ContractMode::Enforce, &request) {
+            WebIntent::NoWeb
+        } else {
+            classify_web_intent(&request)
+        };
+        assert!(!add_web_tools(&mut payload, &config, web_intent));
+        assert_eq!(payload["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["tools"][0]["function"]["name"], "Read");
+        assert!(payload.get("tool_choice").is_none());
     }
 
     #[test]
