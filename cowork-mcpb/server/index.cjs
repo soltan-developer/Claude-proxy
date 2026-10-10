@@ -11,11 +11,11 @@ const error = (id, code, message) => ({ jsonrpc: "2.0", id, error: { code, messa
 function getConfig(env = process.env) {
   const portText = String(env.CLAUDE_PROXY_PORT ?? "18181");
   const port = Number(portText);
-  if (!/^\\d{1,5}$/.test(portText) || !Number.isInteger(port) || port < 1 || port > 65535) {
+  if (!/^\d{1,5}$/.test(portText) || !Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error("Invalid Claude Proxy loopback port.");
   }
   const token = env.CLAUDE_PROXY_GATEWAY_TOKEN;
-  if (typeof token !== "string" || token.length < 1 || token.length > 4096 || /[\\r\\n]/.test(token)) {
+  if (typeof token !== "string" || token.length < 1 || token.length > 4096 || /[\r\n]/.test(token)) {
     throw new Error("Configure the local Claude Proxy MCP token in this extension's settings.");
   }
   return { port, token };
