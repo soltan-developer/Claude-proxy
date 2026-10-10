@@ -51,6 +51,7 @@ fn test_server_state(provider_port: u16, mode: ContractMode) -> (ServerState, st
         display_name: "Sonnet test".into(),
         upstream_model: "mock-upstream".into(),
         tier: "sonnet".into(),
+        thinking_mode: String::new(),
         context_window: 128_000,
         max_output_tokens: 4_096,
         is_default: true,
