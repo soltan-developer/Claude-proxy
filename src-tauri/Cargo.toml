@@ -1,6 +1,6 @@
 [package]
 name = "claude-proxy"
-version = "2.0.13"
+version = "2.0.14"
 description = "Local API proxy for Claude Desktop and Claude Code"
 authors = ["Salman Zadeh"]
 edition = "2021"
