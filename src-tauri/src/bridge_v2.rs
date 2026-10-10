@@ -1162,14 +1162,17 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
             &config,
         )
     );
-    let response = response.map_err(|error| {
-        state.observability.log(
-            "error",
-            "provider ping",
-            "Provider API ping failed before receiving an HTTP response.",
-        );
-        format!("Could not reach the provider API: {error}")
-    })?;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            state.observability.log(
+                "error",
+                "provider ping",
+                "Provider API check failed before receiving an HTTP response.",
+            );
+            return Err(diagnose_provider_transport(&url, &config, &error).await);
+        }
+    };
     let status = response.status();
     let elapsed = started.elapsed().as_millis();
     if !status.is_success() {
@@ -1331,6 +1334,52 @@ async fn probe_provider_fidelity(state: TauriState<'_, BridgeState>) -> Result<V
     Ok(results)
 }
 
+// A failed HTTP request is not an HTTP status. Diagnose DNS and TCP locally
+// and separately; never guess TLS failure if only TCP was tested. The optional
+// system route must not trigger an unrelated direct DNS/TCP probe.
+async fn diagnose_provider_transport(
+    endpoint: &str,
+    config: &AppConfig,
+    error: &reqwest::Error,
+) -> String {
+    if normalize_provider_network_mode(&config.provider_network_mode) == "system" {
+        return "PROVIDER_SYSTEM_ROUTE: اتصال از مسیر پراکسی سیستم برقرار نشد. وضعیت پراکسی ویندوز و پورت آن را بررسی کنید یا مسیر مستقیم را انتخاب کنید.".into();
+    }
+    let Some((host, port)) = Url::parse(endpoint)
+        .ok()
+        .and_then(|url| Some((url.host_str()?.to_owned(), url.port_or_known_default()?)))
+    else {
+        return "PROVIDER_URL: نشانی API ارائه‌دهنده معتبر نیست.".into();
+    };
+    let resolved = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::lookup_host((host.as_str(), port)),
+    )
+    .await;
+    let addresses: Vec<std::net::SocketAddr> = match resolved {
+        Ok(Ok(result)) => result.take(8).collect(),
+        _ => {
+            return "PROVIDER_DNS: تبدیل نام دامنه به IP در ویندوز ناموفق بود. DNS سیستم و اتصال شبکه را بررسی کنید.".into();
+        }
+    };
+    if addresses.is_empty() {
+        return "PROVIDER_DNS: هیچ آدرس IP برای دامنه پیدا نشد. تنظیمات DNS را بررسی کنید.".into();
+    }
+    let tcp = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect(addresses.as_slice()),
+    )
+    .await;
+    if !matches!(tcp, Ok(Ok(_))) {
+        return "PROVIDER_TCP: دامنه به IP تبدیل شد اما اتصال TCP مستقیم برقرار نشد. مسیر اینترنت، IPv4/IPv6 و فایروال را بررسی کنید. پراکسی وب به صورت خودکار به API اعمال نمی‌شود.".into();
+    }
+    if error.is_timeout() {
+        "PROVIDER_TIMEOUT: DNS و TCP مستقیم کار می‌کنند، ولی درخواست HTTPS به‌موقع کامل نشد. TLS، سرعت پاسخ سرور یا مسیر شبکه را بررسی کنید.".into()
+    } else {
+        "PROVIDER_TLS_OR_HTTP: DNS و TCP مستقیم برقرار است، اما تبادل HTTPS شکست خورد. گواهی TLS، محدودیت شبکه یا ارتباط سرور را بررسی کنید؛ خطای TLS هنوز قطعی نیست.".into()
+    }
+}
+
 async fn fetch_upstream_models(
     client: &Client,
     direct: &Client,
@@ -1338,11 +1387,12 @@ async fn fetch_upstream_models(
     observability: &ObservabilityStore,
 ) -> Result<Vec<String>, String> {
     let url = upstream_url(&config.base_url, "models")?;
-    let mut request = client.get(url).timeout(Duration::from_secs(30));
+    let mut request = client.get(&url).timeout(Duration::from_secs(30));
     request = add_upstream_auth(request, config)?;
-    let response = send_provider_with_fallback(request, direct, observability, config)
-        .await
-        .map_err(|error| format!("Could not connect to the model provider: {error}"))?;
+    let response = match send_provider_with_fallback(request, direct, observability, config).await {
+        Ok(response) => response,
+        Err(error) => return Err(diagnose_provider_transport(&url, config, &error).await),
+    };
     let status = response.status();
     let body = response
         .text()
@@ -6319,6 +6369,27 @@ mod tests {
         assert_eq!(converted["content"][0]["text"], "hello");
         assert_eq!(converted["usage"]["input_tokens"], 4);
         assert_eq!(converted["stop_reason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn direct_connection_failure_reports_tcp_stage_without_false_tls_claim() {
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = dead.local_addr().unwrap().port();
+        drop(dead);
+        let url = format!("http://127.0.0.1:{port}/v1/models");
+        let client = build_direct_provider_client().unwrap();
+        let error = client.get(&url).send().await.unwrap_err();
+        let report = diagnose_provider_transport(&url, &AppConfig::default(), &error).await;
+        assert!(report.starts_with("PROVIDER_TCP:"), "{report}");
+        assert!(!report.contains("PROVIDER_TLS_OR_HTTP:"));
+    }
+
+    #[test]
+    fn provider_route_mode_is_persistent_and_defaults_to_direct() {
+        let legacy: DiskConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.provider_network_mode, "direct");
+        assert_eq!(normalize_provider_network_mode("SYSTEM"), "system");
+        assert_eq!(normalize_provider_network_mode("auto"), "direct");
     }
 
     #[test]
