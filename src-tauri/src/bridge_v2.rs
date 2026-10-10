@@ -5542,12 +5542,15 @@ impl ProviderProxyMode {
     fn from_setting(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
             "system" => Self::System,
-            "direct" => Self::Direct,
-            _ => Self::Auto,
+            "auto" => Self::Auto,
+            _ => Self::Direct,
         }
     }
 }
 
+// Provider requests are DIRECT by default. The separate Web Search proxy
+// is applied only in build_web_client and never leaks into provider traffic.
+// Advanced administrators may explicitly opt into system/auto via env var.
 // The user's system may retain HTTPS_PROXY pointing to a stopped local VPN.
 // Only retry failed connection establishment, never an HTTP error or a
 // possibly-sent request that timed out while waiting for a response.
