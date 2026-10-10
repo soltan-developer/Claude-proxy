@@ -1172,15 +1172,34 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
 
 // This is a conservative, script-based smoke check, not a linguistic
 // correctness assessment. A bare marker or an English-only reply is not a pass.
-fn isolated_probe_checks(content: &str, marker: &str, language: &str, tool_count: usize) -> (bool, bool, bool) {
+fn isolated_probe_checks(
+    content: &str,
+    marker: &str,
+    language: &str,
+    tool_count: usize,
+) -> (bool, bool, bool) {
     let marker_at_end = content.trim_end().ends_with(marker);
-    let script_characters = content.chars().filter(|character| match language {
-        "Persian" => matches!(character, '\u{0600}'..='\u{06FF}' | '\u{0750}'..='\u{077F}' | '\u{08A0}'..='\u{08FF}'),
-        "Chinese" => matches!(character, '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}'),
-        _ => false,
-    }).take(2).count();
+    let script_characters = content
+        .chars()
+        .filter(|&character| match language {
+            "Persian" => matches!(
+                character,
+                '\u{0600}'..='\u{06FF}' | '\u{0750}'..='\u{077F}' | '\u{08A0}'..='\u{08FF}'
+            ),
+            "Chinese" => matches!(
+                character,
+                '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}'
+            ),
+            _ => false,
+        })
+        .take(2)
+        .count();
     let script_detected = script_characters >= 2;
-    (marker_at_end && script_detected && tool_count == 0, marker_at_end, script_detected)
+    (
+        marker_at_end && script_detected && tool_count == 0,
+        marker_at_end,
+        script_detected,
+    )
 }
 
 fn isolated_provider_probe_payload(model: &str, prompt: &str) -> Value {
@@ -6123,12 +6142,30 @@ mod tests {
 
     #[test]
     fn isolated_probe_rejects_marker_only_wrong_language_or_wrong_position() {
-        assert_eq!(isolated_probe_checks("FA-527", "FA-527", "Persian", 0), (false, true, false));
-        assert_eq!(isolated_probe_checks("Hello FA-527", "FA-527", "Persian", 0), (false, true, false));
-        assert_eq!(isolated_probe_checks("سلام FA-527 extra", "FA-527", "Persian", 0), (false, false, true));
-        assert_eq!(isolated_probe_checks("سلام FA-527", "FA-527", "Persian", 0), (true, true, true));
-        assert_eq!(isolated_probe_checks("你好 ZH-884", "ZH-884", "Chinese", 0), (true, true, true));
-        assert_eq!(isolated_probe_checks("你好 ZH-884", "ZH-884", "Chinese", 1), (false, true, true));
+        assert_eq!(
+            isolated_probe_checks("FA-527", "FA-527", "Persian", 0),
+            (false, true, false)
+        );
+        assert_eq!(
+            isolated_probe_checks("Hello FA-527", "FA-527", "Persian", 0),
+            (false, true, false)
+        );
+        assert_eq!(
+            isolated_probe_checks("سلام FA-527 extra", "FA-527", "Persian", 0),
+            (false, false, true)
+        );
+        assert_eq!(
+            isolated_probe_checks("سلام FA-527", "FA-527", "Persian", 0),
+            (true, true, true)
+        );
+        assert_eq!(
+            isolated_probe_checks("你好 ZH-884", "ZH-884", "Chinese", 0),
+            (true, true, true)
+        );
+        assert_eq!(
+            isolated_probe_checks("你好 ZH-884", "ZH-884", "Chinese", 1),
+            (false, true, true)
+        );
     }
 
     #[test]
