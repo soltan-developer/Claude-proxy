@@ -1,4 +1,4 @@
-# Claude Proxy 2.0.10
+# Claude Proxy 2.0.11
 
 Claude Proxy is a Windows desktop app that connects Claude Desktop and Claude CLI directly to OpenAI-compatible model providers. Provider credentials, URLs, and model routes start empty on a fresh install.
 
@@ -6,7 +6,7 @@ For developer maintenance and build instructions, see [`DEVELOPMENT.md`](DEVELOP
 
 ## Run the portable app
 
-Run the version-numbered `Claude-Proxy-v2.0.10-Portable.exe`. Each new user-facing build is assigned a unique version, and its version appears in the sidebar and title area. The interface is bundled inside the app; you do not need to start a development server or connect to `localhost:1420`. Windows WebView2 Runtime must be installed. The orange tray icon means the proxy is stopped; green means it is running. Closing the window sends the app to the system tray. To exit, right-click the tray icon and choose **Quit**.
+Run the version-numbered `Claude-Proxy-vX.Y.Z-Portable.exe` (for example, `Claude-Proxy-v2.0.11-Portable.exe`). Each new user-facing build is assigned a unique version, and its version appears in the sidebar and title area. The interface is bundled inside the app; you do not need to start a development server or connect to `localhost:1420`. Windows WebView2 Runtime must be installed. The orange tray icon means the proxy is stopped; green means it is running. Closing the window sends the app to the system tray. To exit, right-click the tray icon and choose **Quit**.
 
 The top-bar language control switches the interface between English and Persian. The selected language is remembered on this computer.
 

@@ -44,6 +44,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+      - name: Check Portable PowerShell script syntax
+        shell: pwsh
+        run: |
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path "scripts/build-portable.ps1").Path, [ref]$null, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -ne 0) { throw "Portable build script has PowerShell syntax errors." }
       - name: Validate local Code smoke script in dry-run (no credentials or provider calls)
         shell: pwsh
         run: ./scripts/verify-local-code.ps1
@@ -59,14 +65,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify synchronized version and required PR bump
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: node scripts/check-version.mjs --base "$BASE_SHA"
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Verify synchronized version and required PR bump
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: node scripts/check-version.mjs --base "$BASE_SHA"
       - name: Install frontend dependencies
         # The repository currently has no package-lock.json; add one before
         # switching this job to a fully reproducible npm ci install.

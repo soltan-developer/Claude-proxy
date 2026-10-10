@@ -12,6 +12,7 @@ on:
       - v2/2.0.9-cowork-bootstrap-fidelity
       - v2/2.0.9-cowork-user-text-order-integrity
       - v2/2.0.10-versioned-portable-release
+      - v2/2.0.11-cowork-native-message-roles
       - v2/2.0.9-tool-fidelity-regressions
   workflow_dispatch:
 
@@ -60,6 +61,13 @@ jobs:
           node scripts/check-version.mjs
           $version = node -p "require('./package.json').version"
           "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Validate Portable PowerShell syntax
+        shell: pwsh
+        run: |
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path "scripts/build-portable.ps1").Path, [ref]$null, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -ne 0) { throw "Portable build script has PowerShell syntax errors." }
 
       - name: Build portable executable
         shell: pwsh

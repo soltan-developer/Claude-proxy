@@ -3059,6 +3059,43 @@ fn user_text_order_preserved(request: &Value, payload: &Value) -> bool {
     ordered_user_texts(request) == ordered_user_texts(payload)
 }
 
+fn cowork_control_content(content: &Value) -> Result<String, String> {
+    match content {
+        Value::String(text) => Ok(text.clone()),
+        Value::Array(blocks)
+            if blocks.iter().all(|block| {
+                block.get("type").and_then(Value::as_str) == Some("text")
+                    && block.get("text").and_then(Value::as_str).is_some()
+            }) =>
+        {
+            Ok(anthropic_text(content))
+        }
+        _ => Err(
+            "COWORK_CONTROL_MESSAGE_CONTENT: system/developer message must contain text blocks."
+                .into(),
+        ),
+    }
+}
+
+fn cowork_tool_content(content: &Value) -> Result<String, String> {
+    match content {
+        Value::String(text) => Ok(text.clone()),
+        Value::Null => Ok(String::new()),
+        Value::Array(blocks)
+            if blocks.iter().all(|block| {
+                block.get("type").and_then(Value::as_str) == Some("text")
+                    && block.get("text").and_then(Value::as_str).is_some()
+            }) =>
+        {
+            Ok(anthropic_text(content))
+        }
+        Value::Object(_) => Ok(content.to_string()),
+        _ => Err(
+            "COWORK_TOOL_RESULT_CONTENT: native tool result contains unsupported content.".into(),
+        ),
+    }
+}
+
 fn anthropic_to_openai(request: &Value, route: &ModelRoute) -> Result<Value, String> {
     let mut messages = Vec::new();
     if let Some(system) = request.get("system") {
@@ -3068,11 +3105,11 @@ fn anthropic_to_openai(request: &Value, route: &ModelRoute) -> Result<Value, Str
         }
     }
     if let Some(input_messages) = request.get("messages").and_then(Value::as_array) {
-        for message in input_messages {
+        for (index, message) in input_messages.iter().enumerate() {
             let role = message
                 .get("role")
                 .and_then(Value::as_str)
-                .unwrap_or("user");
+                .ok_or_else(|| format!("COWORK_MISSING_MESSAGE_ROLE: message_index={index}."))?;
             let content = message.get("content").unwrap_or(&Value::Null);
             match role {
                 "assistant" => {
@@ -3097,13 +3134,46 @@ fn anthropic_to_openai(request: &Value, route: &ModelRoute) -> Result<Value, Str
                         messages.push(json!({ "role": "user", "content": body }));
                     }
                 }
-                // Never quietly turn a protocol control role into a user
-                // instruction; this can create apparent cross-task responses.
+                "system" | "developer" => {
+                    // Control instructions must stay control instructions.
+                    // Never change their priority by relabelling them as user.
+                    let text = cowork_control_content(content)?;
+                    messages.push(json!({ "role": role, "content": text }));
+                }
+                "tool" | "tool_result" => {
+                    // Some Cowork transports send native tool-role messages
+                    // instead of wrapping tool_result inside user content.
+                    // Without a call ID, we cannot safely attach the result.
+                    let call_id = message
+                        .get("tool_call_id")
+                        .or_else(|| message.get("tool_use_id"))
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .ok_or_else(|| {
+                            format!(
+                                "COWORK_TOOL_RESULT_MISSING_ID: message_index={index}; no tool result was attributed to a fabricated call."
+                            )
+                        })?;
+                    let text = cowork_tool_content(content)?;
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": text
+                    }));
+                }
                 _ => {
-                    return Err(
-                        "Unsupported message role in client request. Expected user or assistant."
-                            .into(),
-                    )
+                    // Role identifiers are protocol metadata. Only expose a
+                    // short safe identifier, never client content or secrets.
+                    let display = if role.len() <= 32
+                        && role.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_')
+                    {
+                        role
+                    } else {
+                        "other"
+                    };
+                    return Err(format!(
+                        "COWORK_UNSUPPORTED_MESSAGE_ROLE: message_index={index}, role={display}. Supported roles: user, assistant, system, developer, tool."
+                    ));
                 }
             }
         }
@@ -6497,16 +6567,76 @@ mod tests {
         assert!(user_text_order_preserved(&request, &output));
         output["messages"][1]["content"] = json!("unrelated task");
         assert!(!user_text_order_preserved(&request, &output));
+        let valid_developer = json!({
+            "model":"claude-fable-5-1",
+            "messages":[
+                {"role":"developer","content":"Keep the agent session isolated."},
+                {"role":"user","content":"سلام"}
+            ]
+        });
+        let developer_output = anthropic_to_openai(&valid_developer, &fable_route()).unwrap();
+        assert_eq!(developer_output["messages"][0]["role"], "developer");
+        assert_eq!(
+            developer_output["messages"][0]["content"],
+            "Keep the agent session isolated."
+        );
+        assert!(user_text_order_preserved(
+            &valid_developer,
+            &developer_output
+        ));
+
         let invalid = json!({
             "model":"claude-fable-5-1",
             "messages":[
                 {"role":"user","content":"سلام"},
-                {"role":"developer","content":"unexpected control metadata"}
+                {"role":"unexpected_role","content":"never change this to user"}
             ]
         });
-        assert!(anthropic_to_openai(&invalid, &fable_route())
+        let error = anthropic_to_openai(&invalid, &fable_route()).unwrap_err();
+        assert!(error.contains("COWORK_UNSUPPORTED_MESSAGE_ROLE"));
+        assert!(error.contains("message_index=1"));
+    }
+
+    #[test]
+    fn cowork_native_message_roles_keep_control_and_tool_semantics() {
+        let request = json!({
+            "model": "claude-fable-5-1",
+            "messages": [
+                {"role":"system","content":[{"type":"text","text":"System startup"}]},
+                {"role":"developer","content":"Workspace policy"},
+                {"role":"user","content":"Read the workspace folder"},
+                {"role":"assistant","content":[{"type":"tool_use","id":"call-7",
+                    "name":"Bash","input":{"command":"pwd"}}]},
+                {"role":"tool","tool_call_id":"call-7","content":[
+                    {"type":"text","text":"C:/workspace"}]},
+                {"role":"user","content":"سلام"}
+            ]
+        });
+        let actual = anthropic_to_openai(&request, &fable_route()).unwrap();
+        assert_eq!(actual["messages"][0]["role"], "system");
+        assert_eq!(actual["messages"][0]["content"], "System startup");
+        assert_eq!(actual["messages"][1]["role"], "developer");
+        assert_eq!(actual["messages"][1]["content"], "Workspace policy");
+        assert_eq!(actual["messages"][3]["tool_calls"][0]["id"], "call-7");
+        assert_eq!(actual["messages"][4]["role"], "tool");
+        assert_eq!(actual["messages"][4]["tool_call_id"], "call-7");
+        assert_eq!(actual["messages"][4]["content"], "C:/workspace");
+        assert!(user_text_order_preserved(&request, &actual));
+
+        let no_call_id = json!({
+            "model":"claude-fable-5-1",
+            "messages":[{"role":"tool","content":"orphaned result"}]
+        });
+        assert!(anthropic_to_openai(&no_call_id, &fable_route())
             .unwrap_err()
-            .contains("Unsupported message role"));
+            .contains("COWORK_TOOL_RESULT_MISSING_ID"));
+        let missing_role = json!({
+            "model":"claude-fable-5-1",
+            "messages":[{"content":"cannot invent a user role"}]
+        });
+        assert!(anthropic_to_openai(&missing_role, &fable_route())
+            .unwrap_err()
+            .contains("COWORK_MISSING_MESSAGE_ROLE"));
     }
 
     #[test]
