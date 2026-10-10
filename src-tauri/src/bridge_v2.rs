@@ -5500,6 +5500,77 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderProxyMode {
+    Auto,
+    System,
+    Direct,
+}
+
+impl ProviderProxyMode {
+    fn from_setting(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "system" => Self::System,
+            "direct" => Self::Direct,
+            _ => Self::Auto,
+        }
+    }
+}
+
+// The user's system may retain HTTPS_PROXY pointing to a stopped local VPN.
+// Only retry failed connection establishment, never an HTTP error or a
+// possibly-sent request that timed out while waiting for a response.
+async fn send_provider_with_fallback(
+    request: reqwest::RequestBuilder,
+    direct: &Client,
+    observability: &ObservabilityStore,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mode = ProviderProxyMode::from_setting(
+        &std::env::var("CLAUDE_PROXY_PROVIDER_PROXY_MODE").unwrap_or_default(),
+    );
+    send_provider_with_mode(request, direct, observability, mode).await
+}
+
+async fn send_provider_with_mode(
+    request: reqwest::RequestBuilder,
+    direct: &Client,
+    observability: &ObservabilityStore,
+    mode: ProviderProxyMode,
+) -> Result<reqwest::Response, reqwest::Error> {
+    if mode == ProviderProxyMode::Direct {
+        return direct.execute(request.build()?).await;
+    }
+    let fallback = if mode == ProviderProxyMode::Auto {
+        request.try_clone()
+    } else {
+        None
+    };
+    match request.send().await {
+        Ok(response) => Ok(response),
+        Err(error) if error.is_connect() && fallback.is_some() => {
+            observability.log(
+                "warning",
+                "provider network",
+                "System proxy connection failed. Trying a direct provider connection once. This bypasses the configured system proxy; set CLAUDE_PROXY_PROVIDER_PROXY_MODE=system to disable direct fallback.",
+            );
+            direct.execute(fallback.expect("checked above").build()?).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn build_direct_provider_client() -> Result<Client, String> {
+    Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(20))
+        .read_timeout(Duration::from_secs(180))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(16)
+        .tcp_nodelay(true)
+        .build()
+        .map_err(|error| error.to_string())
+}
+
 fn build_http_client() -> Result<Client, String> {
     Client::builder()
         .connect_timeout(Duration::from_secs(20))
