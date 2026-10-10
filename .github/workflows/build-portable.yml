@@ -11,6 +11,7 @@ on:
       - v2/2.0.9-greeting-tool-routing-audit
       - v2/2.0.9-cowork-bootstrap-fidelity
       - v2/2.0.9-cowork-user-text-order-integrity
+      - v2/2.0.10-versioned-portable-release
       - v2/2.0.9-tool-fidelity-regressions
   workflow_dispatch:
 
@@ -53,6 +54,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify and expose application version
+        shell: pwsh
+        run: |
+          node scripts/check-version.mjs
+          $version = node -p "require('./package.json').version"
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Build portable executable
         shell: pwsh
         run: pnpm build:portable
@@ -60,7 +68,7 @@ jobs:
       - name: Upload portable executable
         uses: actions/upload-artifact@v4
         with:
-          name: Claude-Proxy-Portable
-          path: portable/Claude-Proxy-Portable.exe
+          name: Claude-Proxy-v${{ env.APP_VERSION }}-Portable
+          path: portable/Claude-Proxy-v${{ env.APP_VERSION }}-Portable.exe
           if-no-files-found: error
           retention-days: 14

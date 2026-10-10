@@ -15,7 +15,22 @@ try {
 
     $outputDirectory = Join-Path $projectRoot "portable"
     New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
-    $outputExe = Join-Path $outputDirectory "Claude-Proxy-Portable.exe"
+    $appMetadata = Get-Content -LiteralPath (Join-Path $projectRoot "package.json") -Raw | ConvertFrom-Json
+    $appVersion = [string]$appMetadata.version
+    if ($appVersion -notmatch '^\d+\.\d+\.\d+
+    Copy-Item -LiteralPath $sourceExe -Destination $outputExe -Force
+
+    $file = Get-Item -LiteralPath $outputExe
+    Write-Output "Portable executable: $($file.FullName)"
+    Write-Output "Size: $([math]::Round($file.Length / 1MB, 2)) MB"
+}
+finally {
+    Pop-Location
+}
+) {
+        throw "Invalid application version: $appVersion"
+    }
+    $outputExe = Join-Path $outputDirectory ("Claude-Proxy-v{0}-Portable.exe" -f $appVersion)
     Copy-Item -LiteralPath $sourceExe -Destination $outputExe -Force
 
     $file = Get-Item -LiteralPath $outputExe

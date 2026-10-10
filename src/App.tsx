@@ -344,7 +344,7 @@ function App() {
         </nav>
         <div className="sidebar-bottom">
           <button className="side-hint privacy-trigger" type="button" onClick={() => setPrivacyOpen(true)} aria-label="Privacy & usage rights" title="Privacy & usage rights"><span className="small-orb">i</span><span>Privacy &amp; usage rights</span></button>
-          <div className="sidebar-version"><span>Version</span><strong>{packageMetadata.version}</strong></div>
+          <div className="sidebar-version"><span>{language === "fa" ? "نسخه" : "Version"}</span><strong>v{packageMetadata.version}</strong></div>
           <button className="developer-link" onClick={() => void openCreatorLink()}>Created by Salmanzadeh <span>↗</span></button>
         </div>
       </aside>
@@ -355,7 +355,7 @@ function App() {
           if (event.button !== 0 || (target instanceof Element && target.closest("button, input, select, a"))) return;
           if (isTauriRuntime()) void getCurrentWindow().startDragging().catch(() => {});
         }}>
-          <div className="top-title" data-tauri-drag-region><span className="crumb" data-tauri-drag-region>CLAUDE PROXY</span><span className="crumb-sep" data-tauri-drag-region>/</span><strong data-tauri-drag-region>{wizard ? "Setup" : pageTitles[page]}</strong></div>
+          <div className="top-title" data-tauri-drag-region><span className="crumb" data-tauri-drag-region>CLAUDE PROXY</span><span className="crumb-sep" data-tauri-drag-region>/</span><strong data-tauri-drag-region>{wizard ? "Setup" : pageTitles[page]}</strong><span className="version-tag" data-tauri-drag-region>v{packageMetadata.version}</span></div>
           <div className="top-actions" dir="ltr">
             {(() => {
               const windowControls = (language === "fa" ? ["close", "maximize", "minimize"] : ["minimize", "maximize", "close"]).map((kind) => <WindowControl key={kind} kind={kind as WindowControlKind} onClose={() => setCloseConfirm(true)} onMaximize={() => void maximizeWindow()} onMinimize={() => void minimizeWindow()} />);

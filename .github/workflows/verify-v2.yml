@@ -12,6 +12,14 @@ on:
       - 'src/types.ts'
       - 'src/**'
       - 'package.json'
+      - 'README.md'
+      - 'src-tauri/Cargo.toml'
+      - 'src-tauri/Cargo.lock'
+      - 'src-tauri/tauri.conf.json'
+      - 'scripts/build-portable.ps1'
+      - 'scripts/check-version.mjs'
+      - 'scripts/bump-version.mjs'
+      - '.github/workflows/build-portable.yml'
       - 'package-lock.json'
       - '.github/workflows/verify-v2.yml'
   workflow_dispatch:
@@ -49,6 +57,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify synchronized version and required PR bump
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: node scripts/check-version.mjs --base "$BASE_SHA"
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
