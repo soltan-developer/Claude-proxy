@@ -941,6 +941,82 @@ async fn real_http_client_read_is_not_hijacked_by_required_web_or_host_shell() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+async fn provider_attempts_disabled_shell(Json(payload): Json<Value>) -> Json<Value> {
+    let tools = payload["tools"].as_array().expect("web tools enabled");
+    assert!(tools
+        .iter()
+        .any(|tool| tool["function"]["name"] == "claude_proxy_web_search"));
+    assert!(!tools
+        .iter()
+        .any(|tool| tool["function"]["name"] == "claude_proxy_shell"));
+    Json(json!({
+        "id": "injected-local-shell",
+        "choices": [{"finish_reason": "tool_calls", "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": "attempted-shell",
+                "type": "function",
+                "function": {"name": "terminal", "arguments": "{\\"command\\":\\"echo must-not-run\\"}"}
+            }]
+        }}],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 12}
+    }))
+}
+
+#[tokio::test]
+async fn real_http_web_request_rejects_provider_shell_call_when_shell_disabled() {
+    let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider_port = provider.local_addr().unwrap().port();
+    let upstream = tokio::spawn(async move {
+        axum::serve(
+            provider,
+            Router::new().route("/v1/chat/completions", post(provider_attempts_disabled_shell)),
+        )
+        .await
+        .unwrap();
+    });
+    let (state, dir) = test_server_state(provider_port, ContractMode::Enforce);
+    {
+        let mut config = state.config.write().await;
+        config.web_access_mode = "required".into();
+        config.shell_access_mode = "disabled".into();
+    }
+    let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = gateway.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            gateway,
+            Router::new()
+                .route("/v1/messages", post(anthropic_messages))
+                .with_state(state),
+        )
+        .await
+        .unwrap();
+    });
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .bearer_auth("test-gateway-token")
+        .json(&json!({
+            "model": "claude-sonnet-5-5",
+            "stream": false,
+            "max_tokens": 256,
+            "messages": [{"role": "user", "content": "Search for current news"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let body: Value = response.json().await.unwrap();
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("disabled for this request"));
+    server.abort();
+    upstream.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 async fn provider_recovery_echo(Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
     // Successful local mock represents upstream response *after* direct failover.
     (
