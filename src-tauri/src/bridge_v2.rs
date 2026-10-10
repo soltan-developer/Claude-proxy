@@ -1163,6 +1163,15 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
     ))
 }
 
+fn isolated_provider_probe_payload(model: &str, prompt: &str) -> Value {
+    json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 512,
+        "stream": false
+    })
+}
+
 // An opt-in, minimal provider-only probe. Each question is independent:
 // no Claude Desktop history, tools, web search, system prompts or host actions.
 // Only fixed synthetic markers go to the selected default upstream model.
@@ -1187,12 +1196,7 @@ async fn probe_provider_fidelity(
             .direct_provider_client
             .post(&endpoint)
             .timeout(Duration::from_secs(45))
-            .json(&json!({
-                "model": route.upstream_model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 128,
-                "stream": false
-            }));
+.json(&isolated_provider_probe_payload(&route.upstream_model, prompt));
         let request = add_upstream_auth(request, &config)?;
         let started = Instant::now();
         let response = request
