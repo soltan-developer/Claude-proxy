@@ -1893,12 +1893,14 @@ async fn test_web_access(
         .send()
         .await
     {
-        Ok(response) if response.status().is_success() => response
-            .json::<Value>()
-            .await
-            .ok()
-            .and_then(|value| value.get("ok").and_then(Value::as_bool))
-            == Some(true),
+        Ok(response) if response.status().is_success() => {
+            response
+                .json::<Value>()
+                .await
+                .ok()
+                .and_then(|value| value.get("ok").and_then(Value::as_bool))
+                == Some(true)
+        }
         _ => false,
     };
     checks.push(WebProbeResult {
@@ -6740,11 +6742,7 @@ mod tests {
             9,
         );
         assert!(valid.ok);
-        let denied = evaluate_web_probe(
-            "github",
-            r#"{"error":"The page returned HTTP 403."}"#,
-            11,
-        );
+        let denied = evaluate_web_probe("github", r#"{"error":"The page returned HTTP 403."}"#, 11);
         assert!(!denied.ok);
         assert!(denied.detail.contains("denied"));
         let wrong_page = evaluate_web_probe(
@@ -6759,7 +6757,10 @@ mod tests {
             12,
         );
         assert!(readable.ok);
-        assert_eq!(web_probe_failure("DNS could not resolve"), "DNS resolution failed (may differ from proxy DNS)");
+        assert_eq!(
+            web_probe_failure("DNS could not resolve"),
+            "DNS resolution failed (may differ from proxy DNS)"
+        );
     }
 
     #[test]
