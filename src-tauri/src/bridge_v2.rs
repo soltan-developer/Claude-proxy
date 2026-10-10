@@ -1118,8 +1118,19 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
     let mut request = state.client.get(&url).timeout(Duration::from_secs(15));
     request = add_upstream_auth(request, &config)?;
     let started = Instant::now();
+    // A VPN-only operator may explicitly request system proxy mode. In that
+    // case do not leak a separate direct TCP probe to the provider.
+    let direct_mode = ProviderProxyMode::from_setting(
+        &std::env::var("CLAUDE_PROXY_PROVIDER_PROXY_MODE").unwrap_or_default(),
+    ) == ProviderProxyMode::Direct;
     let (tcp_ms, response) = tokio::join!(
-        measure_direct_provider_tcp_ms(&url),
+        async {
+            if direct_mode {
+                measure_direct_provider_tcp_ms(&url).await
+            } else {
+                None
+            }
+        },
         send_provider_with_fallback(request, &state.direct_provider_client, &state.observability,)
     );
     let response = response.map_err(|error| {
@@ -1195,7 +1206,7 @@ async fn probe_provider_fidelity(state: TauriState<'_, BridgeState>) -> Result<V
         ),
     ] {
         let request = state
-            .direct_provider_client
+            .client
             .post(&endpoint)
             .timeout(Duration::from_secs(45))
             .json(&isolated_provider_probe_payload(
@@ -1204,14 +1215,17 @@ async fn probe_provider_fidelity(state: TauriState<'_, BridgeState>) -> Result<V
             ));
         let request = add_upstream_auth(request, &config)?;
         let started = Instant::now();
-        let response = request
-            .send()
-            .await
-            .map_err(|err| format!("Direct isolated model probe could not connect: {err}"))?;
+        let response = send_provider_with_fallback(
+            request,
+            &state.direct_provider_client,
+            &state.observability,
+        )
+        .await
+        .map_err(|err| format!("Isolated model probe could not connect: {err}"))?;
         let status = response.status();
         if !status.is_success() {
             return Err(format!(
-                "Direct isolated model probe returned HTTP {}. Check the model route and provider API.",
+                "Isolated model probe returned HTTP {}. Check the model route and provider API.",
                 status.as_u16()
             ));
         }
@@ -1233,7 +1247,7 @@ async fn probe_provider_fidelity(state: TauriState<'_, BridgeState>) -> Result<V
             if success { "info" } else { "warning" },
             "provider fidelity",
             &format!(
-                "Isolated direct {language} model probe: marker_matched={success}, tool_calls={tool_count}, response_ms={}.",
+                "Isolated {language} model probe: marker_matched={success}, tool_calls={tool_count}, response_ms={}.",
                 started.elapsed().as_millis()
             ),
         );
