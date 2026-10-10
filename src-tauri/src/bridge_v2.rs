@@ -6163,7 +6163,10 @@ mod tests {
         assert_eq!(messages[1]["tool_call_id"], "call-read");
         assert_eq!(messages[1]["content"], "README fixture result");
         assert_eq!(messages[2]["role"], "user");
-        assert_eq!(messages[2]["content"], "Summarize only the file you just read.");
+        assert_eq!(
+            messages[2]["content"],
+            "Summarize only the file you just read."
+        );
     }
 
     #[test]
