@@ -270,6 +270,7 @@ struct BridgeState {
     config: Arc<RwLock<AppConfig>>,
     runtime: Arc<Mutex<Option<RuntimeHandle>>>,
     client: Client,
+    direct_provider_client: Client,
     upstream_clients: Arc<Vec<Client>>,
     upstream_cursor: Arc<AtomicUsize>,
     upstream_slots: Arc<Semaphore>,
@@ -283,6 +284,7 @@ struct BridgeState {
 #[derive(Clone)]
 struct ServerState {
     config: Arc<RwLock<AppConfig>>,
+    direct_provider_client: Client,
     upstream_clients: Arc<Vec<Client>>,
     upstream_cursor: Arc<AtomicUsize>,
     upstream_slots: Arc<Semaphore>,
@@ -1055,7 +1057,14 @@ async fn get_proxy_status(state: TauriState<'_, BridgeState>) -> Result<ProxySta
 #[tauri::command]
 async fn fetch_models(state: TauriState<'_, BridgeState>) -> Result<Vec<String>, String> {
     let requested_config = state.config.read().await.clone();
-    let models = match fetch_upstream_models(&state.client, &requested_config).await {
+    let models = match fetch_upstream_models(
+        &state.client,
+        &state.direct_provider_client,
+        &requested_config,
+        &state.observability,
+    )
+    .await
+    {
         Ok(models) => models,
         Err(error) => {
             state.observability.log("error", "model discovery", "Model discovery failed. Review the provider URL, authentication, and model discovery endpoint.");
@@ -1088,14 +1097,17 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
     let mut request = state.client.get(url).timeout(Duration::from_secs(15));
     request = add_upstream_auth(request, &config)?;
     let started = std::time::Instant::now();
-    let response = request.send().await.map_err(|error| {
-        state.observability.log(
-            "error",
-            "provider ping",
-            "Provider API ping failed before receiving an HTTP response.",
-        );
-        format!("Could not reach the provider API: {error}")
-    })?;
+    let response =
+        send_provider_with_fallback(request, &state.direct_provider_client, &state.observability)
+            .await
+            .map_err(|error| {
+                state.observability.log(
+                    "error",
+                    "provider ping",
+                    "Provider API ping failed before receiving an HTTP response.",
+                );
+                format!("Could not reach the provider API: {error}")
+            })?;
     let status = response.status();
     let elapsed = started.elapsed().as_millis();
     if !status.is_success() {
@@ -1120,12 +1132,16 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
     ))
 }
 
-async fn fetch_upstream_models(client: &Client, config: &AppConfig) -> Result<Vec<String>, String> {
+async fn fetch_upstream_models(
+    client: &Client,
+    direct: &Client,
+    config: &AppConfig,
+    observability: &ObservabilityStore,
+) -> Result<Vec<String>, String> {
     let url = upstream_url(&config.base_url, "models")?;
     let mut request = client.get(url).timeout(Duration::from_secs(30));
     request = add_upstream_auth(request, config)?;
-    let response = request
-        .send()
+    let response = send_provider_with_fallback(request, direct, observability)
         .await
         .map_err(|error| format!("Could not connect to the model provider: {error}"))?;
     let status = response.status();
@@ -1297,6 +1313,7 @@ async fn start_proxy_inner(state: &BridgeState) -> Result<(), String> {
         .with_state(ServerState {
             config: state.config.clone(),
             upstream_clients: state.upstream_clients.clone(),
+            direct_provider_client: state.direct_provider_client.clone(),
             upstream_cursor: state.upstream_cursor.clone(),
             upstream_slots: state.upstream_slots.clone(),
             web_slots: state.web_slots.clone(),
@@ -1968,7 +1985,13 @@ async fn process_anthropic_messages(
                     return api_error(StatusCode::BAD_GATEWAY, "authentication_error", &error)
                 }
             };
-            let response = match outgoing.json(&payload).send().await {
+            let response = match send_provider_with_fallback(
+                outgoing.json(&payload),
+                &state.direct_provider_client,
+                &state.observability,
+            )
+            .await
+            {
                 Ok(response) => response,
                 Err(error) => {
                     let failure_kind = provider_transport_error_kind(&error);
@@ -2091,6 +2114,7 @@ async fn process_anthropic_messages(
                 state.observability.clone(),
                 upstream_permit,
                 state.next_upstream_client(),
+                state.direct_provider_client.clone(),
                 config.clone(),
                 target.to_string(),
                 continuation_payload,
@@ -2240,6 +2264,7 @@ async fn process_anthropic_messages(
                     );
                     let resumed = fetch_continuation(
                         &state.next_upstream_client(),
+                        &state.direct_provider_client,
                         &config,
                         &target_str,
                         next,
@@ -4110,6 +4135,7 @@ fn stream_openai_response(
     observability: ObservabilityStore,
     upstream_permit: OwnedSemaphorePermit,
     continuation_client: Client,
+    continuation_direct_client: Client,
     continuation_config: AppConfig,
     continuation_target: String,
     continuation_payload: Value,
@@ -4321,6 +4347,7 @@ fn stream_openai_response(
                 );
                 match fetch_continuation(
                     &continuation_client,
+                    &continuation_direct_client,
                     &continuation_config,
                     &continuation_target,
                     next,
@@ -4820,6 +4847,7 @@ fn provider_usage(value: &Value) -> (u64, u64) {
 /// continuing.
 async fn fetch_continuation(
     client: &Client,
+    direct: &Client,
     config: &AppConfig,
     target: &str,
     mut payload: Value,
@@ -4846,7 +4874,13 @@ async fn fetch_continuation(
                 return None;
             }
         };
-        let response = match request.json(&payload).send().await {
+        let response = match send_provider_with_fallback(
+            request.json(&payload),
+            direct,
+            observability,
+        )
+        .await
+        {
             Ok(response) => response,
             Err(error) => {
                 observability.log(
@@ -5497,6 +5531,79 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderProxyMode {
+    Auto,
+    System,
+    Direct,
+}
+
+impl ProviderProxyMode {
+    fn from_setting(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "system" => Self::System,
+            "direct" => Self::Direct,
+            _ => Self::Auto,
+        }
+    }
+}
+
+// The user's system may retain HTTPS_PROXY pointing to a stopped local VPN.
+// Only retry failed connection establishment, never an HTTP error or a
+// possibly-sent request that timed out while waiting for a response.
+async fn send_provider_with_fallback(
+    request: reqwest::RequestBuilder,
+    direct: &Client,
+    observability: &ObservabilityStore,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mode = ProviderProxyMode::from_setting(
+        &std::env::var("CLAUDE_PROXY_PROVIDER_PROXY_MODE").unwrap_or_default(),
+    );
+    send_provider_with_mode(request, direct, observability, mode).await
+}
+
+async fn send_provider_with_mode(
+    request: reqwest::RequestBuilder,
+    direct: &Client,
+    observability: &ObservabilityStore,
+    mode: ProviderProxyMode,
+) -> Result<reqwest::Response, reqwest::Error> {
+    if mode == ProviderProxyMode::Direct {
+        return direct.execute(request.build()?).await;
+    }
+    let fallback = if mode == ProviderProxyMode::Auto {
+        request.try_clone()
+    } else {
+        None
+    };
+    match request.send().await {
+        Ok(response) => Ok(response),
+        Err(error) if error.is_connect() && fallback.is_some() => {
+            observability.log(
+                "warning",
+                "provider network",
+                "System proxy connection failed. Trying a direct provider connection once. This bypasses the configured system proxy; set CLAUDE_PROXY_PROVIDER_PROXY_MODE=system to disable direct fallback.",
+            );
+            direct
+                .execute(fallback.expect("checked above").build()?)
+                .await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn build_direct_provider_client() -> Result<Client, String> {
+    Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(20))
+        .read_timeout(Duration::from_secs(180))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(16)
+        .tcp_nodelay(true)
+        .build()
+        .map_err(|error| error.to_string())
+}
+
 fn build_http_client() -> Result<Client, String> {
     Client::builder()
         .connect_timeout(Duration::from_secs(20))
@@ -5529,11 +5636,13 @@ pub fn run() {
                 .first()
                 .cloned()
                 .ok_or_else(|| "The upstream client pool could not be initialized.".to_string())?;
+            let direct_provider_client = build_direct_provider_client()?;
             let state = BridgeState {
                 app: app.handle().clone(),
                 config: Arc::new(RwLock::new(config)),
                 runtime: Arc::new(Mutex::new(None)),
                 client,
+                direct_provider_client,
                 upstream_clients: Arc::new(upstream_clients),
                 upstream_cursor: Arc::new(AtomicUsize::new(0)),
                 upstream_slots: Arc::new(Semaphore::new(UPSTREAM_CONCURRENCY)),

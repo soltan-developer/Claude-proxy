@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - v2/automatic-provider-network-recovery
   workflow_dispatch:
 
 permissions:
