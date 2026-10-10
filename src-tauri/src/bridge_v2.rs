@@ -3048,9 +3048,7 @@ fn ordered_user_texts(value: &Value) -> Vec<String> {
             messages
                 .iter()
                 .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-                .map(|message| {
-                    anthropic_text(message.get("content").unwrap_or(&Value::Null))
-                })
+                .map(|message| anthropic_text(message.get("content").unwrap_or(&Value::Null)))
                 .filter(|text| !text.is_empty())
                 .collect()
         })
@@ -3101,10 +3099,12 @@ fn anthropic_to_openai(request: &Value, route: &ModelRoute) -> Result<Value, Str
                 }
                 // Never quietly turn a protocol control role into a user
                 // instruction; this can create apparent cross-task responses.
-                _ => return Err(
-                    "Unsupported message role in client request. Expected user or assistant."
-                        .into(),
-                ),
+                _ => {
+                    return Err(
+                        "Unsupported message role in client request. Expected user or assistant."
+                            .into(),
+                    )
+                }
             }
         }
     }
