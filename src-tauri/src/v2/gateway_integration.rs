@@ -1121,3 +1121,23 @@ async fn provider_direct_mode_never_dials_a_configured_dead_system_proxy() {
     server.abort();
     let _ = std::fs::remove_dir_all(dir);
 }
+
+
+#[test]
+fn isolated_probe_is_single_turn_and_has_no_client_or_web_tools() {
+    let probe = isolated_provider_probe_payload(
+        "mock-upstream",
+        "فقط به فارسی پاسخ بده و عبارت FA-527 را در پایان بنویس.",
+    );
+    assert_eq!(probe["model"], "mock-upstream");
+    assert_eq!(probe["stream"], false);
+    assert_eq!(probe["max_tokens"], 512);
+    let messages = probe["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["role"], "user");
+    assert!(messages[0]["content"].as_str().unwrap().contains("FA-527"));
+    assert!(probe.get("tools").is_none());
+    assert!(probe.get("tool_choice").is_none());
+    assert!(probe.get("system").is_none());
+    assert!(probe.get("metadata").is_none());
+}
