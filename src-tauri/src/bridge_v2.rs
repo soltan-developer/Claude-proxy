@@ -83,6 +83,7 @@ struct AppConfig {
     base_url: String,
     api_key: String,
     auth_style: String,
+    provider_network_mode: String,
     upstream_models: Vec<String>,
     routes: Vec<ModelRoute>,
     proxy_port: u16,
@@ -106,6 +107,7 @@ impl Default for AppConfig {
             base_url: String::new(),
             api_key: String::new(),
             auth_style: "bearer".into(),
+            provider_network_mode: default_provider_network_mode(),
             upstream_models: Vec::new(),
             routes: Vec::new(),
             proxy_port: DEFAULT_PORT,
@@ -138,6 +140,8 @@ struct DiskConfig {
     api_key_protected: String,
     #[serde(default = "default_auth_style")]
     auth_style: String,
+    #[serde(default = "default_provider_network_mode")]
+    provider_network_mode: String,
     #[serde(default)]
     upstream_models: Vec<String>,
     #[serde(default)]
@@ -178,6 +182,8 @@ struct ConfigInput {
     #[serde(default)]
     clear_api_key: bool,
     auth_style: String,
+    #[serde(default = "default_provider_network_mode")]
+    provider_network_mode: String,
     #[serde(default)]
     upstream_models: Vec<String>,
     #[serde(default)]
@@ -210,6 +216,7 @@ struct PublicConfig {
     base_url: String,
     api_key_configured: bool,
     auth_style: String,
+    provider_network_mode: String,
     upstream_models: Vec<String>,
     routes: Vec<ModelRoute>,
     proxy_port: u16,
@@ -232,6 +239,7 @@ impl From<&AppConfig> for PublicConfig {
             base_url: config.base_url.clone(),
             api_key_configured: !config.api_key.is_empty(),
             auth_style: config.auth_style.clone(),
+            provider_network_mode: config.provider_network_mode.clone(),
             upstream_models: config.upstream_models.clone(),
             routes: config.routes.clone(),
             proxy_port: config.proxy_port,
@@ -312,6 +320,18 @@ fn default_auth_style() -> String {
 fn default_theme() -> String {
     "light".into()
 }
+fn default_provider_network_mode() -> String {
+    "direct".into()
+}
+
+fn normalize_provider_network_mode(value: &str) -> &'static str {
+    if value.trim().eq_ignore_ascii_case("system") {
+        "system"
+    } else {
+        "direct"
+    }
+}
+
 fn default_port() -> u16 {
     DEFAULT_PORT
 }
@@ -694,6 +714,7 @@ fn load_config(path: &Path) -> AppConfig {
         base_url: disk.base_url,
         api_key: unprotect_secret(&disk.api_key_protected).unwrap_or_default(),
         auth_style: disk.auth_style,
+        provider_network_mode: normalize_provider_network_mode(&disk.provider_network_mode).into(),
         upstream_models: disk.upstream_models,
         routes: normalize_routes(disk.routes),
         proxy_port: if disk.proxy_port == 0 {
@@ -729,6 +750,7 @@ fn persist_config(path: &Path, config: &AppConfig) -> Result<(), String> {
         base_url: config.base_url.clone(),
         api_key_protected: protect_secret(&config.api_key)?,
         auth_style: config.auth_style.clone(),
+        provider_network_mode: config.provider_network_mode.clone(),
         upstream_models: config.upstream_models.clone(),
         routes: config.routes.clone(),
         proxy_port: config.proxy_port,
@@ -984,6 +1006,8 @@ async fn save_config(
         "bearer"
     }
     .into();
+    config.provider_network_mode =
+        normalize_provider_network_mode(&input.provider_network_mode).into();
     config.upstream_models = input
         .upstream_models
         .into_iter()
@@ -1075,6 +1099,7 @@ async fn fetch_models(state: TauriState<'_, BridgeState>) -> Result<Vec<String>,
     if config.base_url != requested_config.base_url
         || config.api_key != requested_config.api_key
         || config.auth_style != requested_config.auth_style
+        || config.provider_network_mode != requested_config.provider_network_mode
     {
         return Err(
             "Provider settings changed while models were being fetched. Please try again.".into(),
@@ -1120,9 +1145,8 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
     let started = Instant::now();
     // A VPN-only operator may explicitly request system proxy mode. In that
     // case do not leak a separate direct TCP probe to the provider.
-    let direct_mode = ProviderProxyMode::from_setting(
-        &std::env::var("CLAUDE_PROXY_PROVIDER_PROXY_MODE").unwrap_or_default(),
-    ) == ProviderProxyMode::Direct;
+    let direct_mode =
+        ProviderProxyMode::from_setting(&config.provider_network_mode) == ProviderProxyMode::Direct;
     let (tcp_ms, response) = tokio::join!(
         async {
             if direct_mode {
@@ -1131,7 +1155,12 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
                 None
             }
         },
-        send_provider_with_fallback(request, &state.direct_provider_client, &state.observability,)
+        send_provider_with_fallback(
+            request,
+            &state.direct_provider_client,
+            &state.observability,
+            &config,
+        )
     );
     let response = response.map_err(|error| {
         state.observability.log(
@@ -1251,6 +1280,7 @@ async fn probe_provider_fidelity(state: TauriState<'_, BridgeState>) -> Result<V
             request,
             &state.direct_provider_client,
             &state.observability,
+            &config,
         )
         .await
         .map_err(|err| format!("Isolated model probe could not connect: {err}"))?;
@@ -1310,7 +1340,7 @@ async fn fetch_upstream_models(
     let url = upstream_url(&config.base_url, "models")?;
     let mut request = client.get(url).timeout(Duration::from_secs(30));
     request = add_upstream_auth(request, config)?;
-    let response = send_provider_with_fallback(request, direct, observability)
+    let response = send_provider_with_fallback(request, direct, observability, config)
         .await
         .map_err(|error| format!("Could not connect to the model provider: {error}"))?;
     let status = response.status();
@@ -2158,6 +2188,7 @@ async fn process_anthropic_messages(
                 outgoing.json(&payload),
                 &state.direct_provider_client,
                 &state.observability,
+                &config,
             )
             .await
             {
@@ -5077,6 +5108,7 @@ async fn fetch_continuation(
             request.json(&payload),
             direct,
             observability,
+            config,
         )
         .await
         {
@@ -5747,21 +5779,21 @@ impl ProviderProxyMode {
     }
 }
 
-// Provider requests are DIRECT by default. The separate Web Search proxy
-// is applied only in build_web_client and never leaks into provider traffic.
-// Advanced administrators may explicitly opt into system/auto via env var.
-// The user's system may retain HTTPS_PROXY pointing to a stopped local VPN.
-// Only retry failed connection establishment, never an HTTP error or a
-// possibly-sent request that timed out while waiting for a response.
+// One explicit, persisted policy for model listing, inference and continuation.
+// Web Search has an independent client. No silent proxy fallback.
 async fn send_provider_with_fallback(
     request: reqwest::RequestBuilder,
     direct: &Client,
     observability: &ObservabilityStore,
+    config: &AppConfig,
 ) -> Result<reqwest::Response, reqwest::Error> {
-    let mode = ProviderProxyMode::from_setting(
-        &std::env::var("CLAUDE_PROXY_PROVIDER_PROXY_MODE").unwrap_or_default(),
-    );
-    send_provider_with_mode(request, direct, observability, mode).await
+    send_provider_with_mode(
+        request,
+        direct,
+        observability,
+        ProviderProxyMode::from_setting(&config.provider_network_mode),
+    )
+    .await
 }
 
 async fn send_provider_with_mode(
