@@ -534,7 +534,7 @@ function Overview({ config, draft, status, localUrl, ready, onCopy, onGo, onWiza
   </>;
 }
 
-function ConnectionPage({ language, draft, setDraft, secret, setSecret, clearSecret, busy, isTauri, onSave, onFetch, onPing, onProbe, probeResults, onTest }: {
+function ConnectionPage({ language, draft, setDraft, secret, setSecret, clearSecret, setClearSecret, busy, isTauri, onSave, onFetch, onPing, onProbe, probeResults, onTest }: {
   language: Language; draft: Draft; setDraft: Dispatch<SetStateAction<Draft>>; secret: string; setSecret: (value: string) => void; clearSecret: boolean; setClearSecret: (value: boolean) => void; busy: string; isTauri: boolean; onSave: () => void; onFetch: () => void; onPing: () => void; onProbe: () => void; probeResults: ProviderProbeResult[]; onTest: () => void;
 }) {
   const [showSecret, setShowSecret] = useState(false);
