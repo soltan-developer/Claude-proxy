@@ -681,6 +681,13 @@ fn user_text_for_web_intent(raw: &str) -> String {
     cleaned.trim().to_owned()
 }
 
+fn is_simple_greeting_request(text: &str) -> bool {
+    matches!(
+        user_text_for_web_intent(text).trim(),
+        "سلام" | "سلام!" | "سلام؟" | "hello" | "hi" | "Hi" | "Hello"
+    )
+}
+
 fn classify_web_intent(request: &Value) -> WebIntent {
     let Some(messages) = request.get("messages").and_then(Value::as_array) else {
         return WebIntent::NoWeb;
@@ -2115,6 +2122,41 @@ async fn process_anthropic_messages(
         add_shell_tool(&mut payload, &config)
     };
     let local_tools_enabled = web_enabled || shell_enabled;
+    let inbound_last_user = request
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| {
+            messages
+                .iter()
+                .rev()
+                .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        })
+        .map(|message| anthropic_text(message.get("content").unwrap_or(&Value::Null)))
+        .unwrap_or_default();
+    let outbound_last_user = payload
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| {
+            messages
+                .iter()
+                .rev()
+                .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        })
+        .map(|message| anthropic_text(message.get("content").unwrap_or(&Value::Null)))
+        .unwrap_or_default();
+    // A greeting-category flag is deliberately not a prompt hash: hashing
+    // a one-word message like "سلام" is trivially reversible.
+    let inbound_greeting = is_simple_greeting_request(&inbound_last_user);
+    let outbound_greeting = is_simple_greeting_request(&outbound_last_user);
+    state.observability.log(
+        "info",
+        "request provenance",
+        &format!(
+            "Request {request_id}: inbound_greeting={inbound_greeting}, outbound_greeting={outbound_greeting}, inbound_message_count={}, upstream_message_count={}, streaming={client_wants_stream}.",
+            request.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
+            payload.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
+        ),
+    );
     // An audit of the request SHAPE, not the content: safe to keep enabled
     // even when the V2 contract flag is off. The diagnostic page can prove
     // whether the gateway itself added web tools to a specific request.
@@ -2460,11 +2502,19 @@ async fn process_anthropic_messages(
             "info",
             "provider response shape",
             &format!(
-                "Request {request_id}: provider_tool_calls={}, local_web_enabled={web_enabled}, local_shell_enabled={shell_enabled}, local_tool_rounds={web_round}.",
+                "Request {request_id}: provider_tool_calls={}, has_separate_reasoning={}, has_answer_content={}, local_web_enabled={web_enabled}, local_shell_enabled={shell_enabled}, local_tool_rounds={web_round}.",
                 value
                     .pointer("/choices/0/message/tool_calls")
                     .and_then(Value::as_array)
                     .map_or(0, Vec::len),
+                value
+                    .pointer("/choices/0/message/reasoning_content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty()),
+                value
+                    .pointer("/choices/0/message/content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty()),
             ),
         );
         // Never forward an over-limit or unmeasured strict-mode response.

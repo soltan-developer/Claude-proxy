@@ -945,8 +945,10 @@ async fn real_http_client_read_is_not_hijacked_by_required_web_or_host_shell() {
 // Mock endpoint checks the outbound request, not language quality.
 async fn greeting_with_environment_capture(Json(payload): Json<Value>) -> Json<Value> {
     let messages = payload["messages"].as_array().expect("messages forwarded");
-    assert_eq!(messages.len(), 2);
-    let user_text = messages[1]["content"].as_str().expect("user content");
+    // The fixture supplies no system prompt, so the forwarded request
+    // must contain exactly one (unaltered) user message.
+    assert_eq!(messages.len(), 1);
+    let user_text = messages[0]["content"].as_str().expect("user content");
     assert!(user_text.ends_with("سلام"));
     assert!(user_text.contains("<system-reminder>"));
     assert!(payload.get("tools").is_none());
