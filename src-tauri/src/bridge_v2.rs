@@ -2186,15 +2186,32 @@ async fn process_anthropic_messages(
     let inbound_greeting = is_simple_greeting_request(&inbound_last_user);
     let outbound_greeting = is_simple_greeting_request(&outbound_last_user);
     let last_user_text_preserved = inbound_last_user == outbound_last_user;
+    let ordered_user_text_preserved = user_text_order_preserved(&request, &payload);
     state.observability.log(
         "info",
         "request provenance",
         &format!(
-            "Request {request_id}: inbound_greeting={inbound_greeting}, outbound_greeting={outbound_greeting}, last_user_text_preserved={last_user_text_preserved}, inbound_message_count={}, upstream_message_count={}, streaming={client_wants_stream}, client_tool_context_preserved={client_tools_owned}.",
+            "Request {request_id}: inbound_greeting={inbound_greeting}, outbound_greeting={outbound_greeting}, last_user_text_preserved={last_user_text_preserved}, ordered_user_text_preserved={ordered_user_text_preserved}, inbound_message_count={}, upstream_message_count={}, streaming={client_wants_stream}, client_tool_context_preserved={client_tools_owned}.",
             request.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
             payload.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
         ),
     );
+    // A changed sequence of human-text messages is not a safe best-effort
+    // translation. Report it visibly before forwarding anything upstream.
+    if !ordered_user_text_preserved {
+        state.observability.log(
+            "error",
+            "request fidelity",
+            &format!(
+                "Request {request_id}: human-text message sequence changed during translation; request rejected before provider execution."
+            ),
+        );
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "COWORK_MESSAGE_FIDELITY_ERROR: the adapter could not preserve the text of the client messages. No request was sent to the provider.",
+        );
+    }
     // An audit of the request SHAPE, not the content: safe to keep enabled
     // even when the V2 contract flag is off. The diagnostic page can prove
     // whether the gateway itself added web tools to a specific request.
@@ -3020,6 +3037,28 @@ fn resolve_route<'a>(routes: &'a [ModelRoute], requested: &str) -> Option<&'a Mo
         })
 }
 
+/// Compare the ordered, non-empty human-text segments, not the last 'user'
+/// role. In Claude, tool results arrive inside user messages that may contain
+/// no human text; after translation they become OpenAI 'tool' messages.
+fn ordered_user_texts(value: &Value) -> Vec<String> {
+    value
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(|messages| {
+            messages
+                .iter()
+                .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+                .map(|message| anthropic_text(message.get("content").unwrap_or(&Value::Null)))
+                .filter(|text| !text.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn user_text_order_preserved(request: &Value, payload: &Value) -> bool {
+    ordered_user_texts(request) == ordered_user_texts(payload)
+}
+
 fn anthropic_to_openai(request: &Value, route: &ModelRoute) -> Result<Value, String> {
     let mut messages = Vec::new();
     if let Some(system) = request.get("system") {
@@ -3047,7 +3086,7 @@ fn anthropic_to_openai(request: &Value, route: &ModelRoute) -> Result<Value, Str
                         messages.push(item);
                     }
                 }
-                _ => {
+                "user" => {
                     let (body, results) = user_content(content);
                     // A completed assistant tool_call must be followed by its
                     // tool response before any new user instruction. Anthropic
@@ -3057,6 +3096,14 @@ fn anthropic_to_openai(request: &Value, route: &ModelRoute) -> Result<Value, Str
                     if body != Value::Null {
                         messages.push(json!({ "role": "user", "content": body }));
                     }
+                }
+                // Never quietly turn a protocol control role into a user
+                // instruction; this can create apparent cross-task responses.
+                _ => {
+                    return Err(
+                        "Unsupported message role in client request. Expected user or assistant."
+                            .into(),
+                    )
                 }
             }
         }
@@ -6414,6 +6461,52 @@ mod tests {
         assert_eq!(converted["reasoning_effort"], "medium");
         assert_eq!(converted["chat_template_kwargs"]["custom_flag"], true);
         assert_eq!(converted["chat_template_kwargs"]["enable_thinking"], true);
+    }
+
+    #[test]
+    fn cowork_tool_results_do_not_count_as_different_human_instructions() {
+        let request = json!({
+            "model":"claude-fable-5-1",
+            "system":"Cowork session bootstrap",
+            "tools":[{"name":"Bash","input_schema":{"type":"object"}}],
+            "messages":[
+                {"role":"user","content":"سلام"},
+                {"role":"assistant","content":[{"type":"tool_use","id":"c1",
+                    "name":"Bash","input":{"command":"pwd"}}]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"c1",
+                    "content":"mock result"}]}
+            ]
+        });
+        let output = anthropic_to_openai(&request, &fable_route()).unwrap();
+        assert!(user_text_order_preserved(&request, &output));
+        assert_eq!(ordered_user_texts(&request), vec!["سلام"]);
+        assert_eq!(ordered_user_texts(&output), vec!["سلام"]);
+        assert_eq!(output["messages"][3]["role"], "tool");
+    }
+
+    #[test]
+    fn cowork_user_instructions_must_not_be_changed_or_relabelled() {
+        let request = json!({
+            "model":"claude-fable-5-1",
+            "messages":[
+                {"role":"user","content":"Cowork bootstrap"},
+                {"role":"user","content":[{"type":"text","text":"سلام"}]}
+            ]
+        });
+        let mut output = anthropic_to_openai(&request, &fable_route()).unwrap();
+        assert!(user_text_order_preserved(&request, &output));
+        output["messages"][1]["content"] = json!("unrelated task");
+        assert!(!user_text_order_preserved(&request, &output));
+        let invalid = json!({
+            "model":"claude-fable-5-1",
+            "messages":[
+                {"role":"user","content":"سلام"},
+                {"role":"developer","content":"unexpected control metadata"}
+            ]
+        });
+        assert!(anthropic_to_openai(&invalid, &fable_route())
+            .unwrap_err()
+            .contains("Unsupported message role"));
     }
 
     #[test]
