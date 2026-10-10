@@ -971,7 +971,10 @@ async fn real_http_web_request_rejects_provider_shell_call_when_shell_disabled()
     let upstream = tokio::spawn(async move {
         axum::serve(
             provider,
-            Router::new().route("/v1/chat/completions", post(provider_attempts_disabled_shell)),
+            Router::new().route(
+                "/v1/chat/completions",
+                post(provider_attempts_disabled_shell),
+            ),
         )
         .await
         .unwrap();
