@@ -241,3 +241,10 @@ node scripts/check-version.mjs
 این فرمان همهٔ نقاط ثبت نسخه (`package.json`، `src-tauri/tauri.conf.json`، `src-tauri/Cargo.toml`، `src-tauri/Cargo.lock` و عنوان `README.md`) را با هم تغییر می‌دهد. نسخهٔ رابط از `package.json` خوانده می‌شود؛ نسخهٔ قابل مشاهده در Sidebar و Topbar یکسان است. نام EXE و artifact اکشن ویندوز `Claude-Proxy-vX.Y.Z-Portable.exe` و `Claude-Proxy-vX.Y.Z-Portable` است. اطلاعات رمزنگاری‌شده، پروفایل Claude و تنظیمات ذخیره‌شدهٔ کاربر با افزایش شمارهٔ نسخه حذف نمی‌شوند.
 
 Workflow بررسی V2 ناسازگاری نسخه‌ها را رد می‌کند و در Pull Request نسخهٔ جدید را با نسخهٔ پایه مقایسه می‌کند؛ اگر bump نکرده باشد، CI موفق نمی‌شود. نسخهٔ تأییدشده فقط زمانی قابل معرفی است که Rust tests، Frontend و Portable روی **یک SHA** موفق باشند. برای هر PR تغییر بعدی ابتدا نسخه را مجدداً افزایش بدهید؛ شمارهٔ یک بستهٔ آزمایشی قبلی را تکرار نکنید.
+
+
+## 2.0.11 — سازگاری نقش‌های پیام Cowork و نسخه‌گذاری
+
+خطای `API Error: 400 Unsupported message role in client request` از اعتبارسنجی سخت‌گیرانهٔ PR #26 می‌آمد: آن کد فقط `user` و `assistant` را می‌پذیرفت. در این نسخه `system` و `developer` با نقش کنترلی خودشان حفظ می‌شوند؛ `tool`/ `tool_result` تنها با شناسهٔ واقعی `tool_call_id` یا `tool_use_id` به پیام ابزار OpenAI تبدیل می‌شوند. تبدیل ناشناخته به `user`، ساختن شناسهٔ ابزار جعلی و حذف ساکت محتوای نامعتبر مجاز نیست. خطاهای باقیمانده اکنون کد `COWORK_UNSUPPORTED_MESSAGE_ROLE`، شمارهٔ پیام و نام امن نقش را گزارش می‌کنند، بدون ذخیرهٔ محتوای مکالمه یا توکن.
+
+**نسخه:** `2.0.11`. نام فایل `Claude-Proxy-v2.0.11-Portable.exe` و نام آرتیفکت GitHub `Claude-Proxy-v2.0.11-Portable` خواهد بود. شماره در نوار بالا و سایدبار نیز دیده می‌شود. افزایش نسخه در بستهٔ تغییر بعدی الزامی است و باید با `node scripts/bump-version.mjs` و `node scripts/check-version.mjs` در `package.json`، Tauri، Cargo، Cargo.lock و README هماهنگ شود. PR CI این موضوع را در برابر نسخهٔ پایه کنترل می‌کند. این اصلاح برچسب نسخه/آداپتر است و به‌تنهایی کیفیت پاسخ Qwen را تضمین نمی‌کند.

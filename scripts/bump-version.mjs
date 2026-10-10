@@ -1,32 +1,34 @@
 #!/usr/bin/env node
-// Bump all release identities together. Call once for each new user-facing
-// edit/release batch; keep the resulting version unique for downloaded EXEs.
+// Increase the version once per user-delivered change batch (no credential writes).
+// Prevalidates every file before making any changes.
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
-const load = (path) => readFileSync(resolve(root, path), "utf8");
-const updates = [];
-const replaceOnce = (path, re, replacement) => {
-  const before = load(path);
-  const matches = [...before.matchAll(new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g"))];
-  if (matches.length !== 1) throw new Error(`Expected one version field in ${path}, found ${matches.length}.`);
-  updates.push([path, before.replace(re, replacement)]);
-};
-
-const current = JSON.parse(load("package.json")).version;
+const read = (path) => readFileSync(resolve(root, path), "utf8");
+const current = JSON.parse(read("package.json")).version;
 if (!/^\d+\.\d+\.\d+$/.test(current)) throw new Error("Invalid current semantic version.");
 const [major, minor, patch] = current.split(".").map(Number);
-const newVersion = process.argv[2] ?? `${major}.${minor}.${patch + 1}`;
-if (!/^\d+\.\d+\.\d+$/.test(newVersion)) throw new Error("Pass a numeric MAJOR.MINOR.PATCH version.");
-const [nmaj, nmin, npat] = newVersion.split(".").map(Number);
-if (!(nmaj > major || (nmaj === major && (nmin > minor || (nmin === minor && npat > patch))))) {
-  throw new Error("New version must be strictly greater than current.");
+const next = process.argv[2] ?? `${major}.${minor}.${patch + 1}`;
+if (!/^\d+\.\d+\.\d+$/.test(next)) throw new Error("Version must be numeric MAJOR.MINOR.PATCH.");
+const [nm, nn, np] = next.split(".").map(Number);
+if (!(nm > major || (nm === major && (nn > minor || (nn === minor && np > patch))))) {
+  throw new Error(`Version ${next} must be greater than ${current}.`);
 }
-replaceOnce("package.json", new RegExp(`("version"\\s*:\\s*")${current.replaceAll(".", "\\.")}("`), `$1${newVersion}$2`);
-replaceOnce("src-tauri/tauri.conf.json", new RegExp(`("version"\\s*:\\s*")${current.replaceAll(".", "\\.")}("`), `$1${newVersion}$2`);
-replaceOnce("src-tauri/Cargo.toml", new RegExp(`^(version = ")${current.replaceAll(".", "\\.")}(")`, "m"), `$1${newVersion}$2`);
-replaceOnce("src-tauri/Cargo.lock", new RegExp(`(\\[\\[package\\]\\]\\s*\\nname = "claude-proxy"\\s*\\nversion = ")${current.replaceAll(".", "\\.")}(")`), `$1${newVersion}$2`);
-replaceOnce("README.md", /^# Claude Proxy \d+\.\d+\.\d+/m, `# Claude Proxy ${newVersion}`);
-for (const [path, next] of updates) writeFileSync(resolve(root, path), next);
-console.log(`Bumped ${current} → ${newVersion}; run node scripts/check-version.mjs`);
+
+const changes = [];
+function stage(path, regex) {
+  const before = read(path);
+  const matches = [...before.matchAll(new RegExp(regex.source, regex.flags.includes("g") ? regex.flags : regex.flags + "g"))];
+  if (matches.length !== 1) throw new Error(`Expected one version marker in ${path}, found ${matches.length}.`);
+  if (matches[0][2] !== current) throw new Error(`Version mismatch in ${path}: ${matches[0][2]} vs ${current}.`);
+  changes.push([path, before.replace(regex, (_, prefix, _old, suffix) => prefix + next + suffix)]);
+}
+stage("package.json", /^(\s*"version": ")(\d+\.\d+\.\d+)(")/m);
+stage("src-tauri/tauri.conf.json", /^(\s*"version": ")(\d+\.\d+\.\d+)(")/m);
+stage("src-tauri/Cargo.toml", /^(version = ")(\d+\.\d+\.\d+)(")/m);
+stage("src-tauri/Cargo.lock", /(\[\[package\]\]\nname = "claude-proxy"\nversion = ")(\d+\.\d+\.\d+)(")/);
+stage("README.md", /^(# Claude Proxy )(\d+\.\d+\.\d+)()$/m);
+
+for (const [path, newText] of changes) writeFileSync(resolve(root, path), newText);
+console.log(`Version bumped: ${current} -> ${next}. Verify: node scripts/check-version.mjs`);

@@ -434,7 +434,7 @@ dependencies = [
 
 [[package]]
 name = "claude-proxy"
-version = "2.0.10"
+version = "2.0.11"
 dependencies = [
  "async-stream",
  "axum",

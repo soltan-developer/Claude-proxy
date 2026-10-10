@@ -12,6 +12,7 @@ on:
       - v2/2.0.9-cowork-bootstrap-fidelity
       - v2/2.0.9-cowork-user-text-order-integrity
       - v2/2.0.10-versioned-portable-release
+      - v2/2.0.11-cowork-native-message-roles
       - v2/2.0.9-tool-fidelity-regressions
   workflow_dispatch:
 
