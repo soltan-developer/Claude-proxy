@@ -1639,6 +1639,7 @@ async fn start_proxy_inner(state: &BridgeState) -> Result<(), String> {
     let (stop_tx, stop_rx) = oneshot::channel();
     let app = Router::new()
         .route("/healthz", get(healthz))
+        .route("/mcp", post(mcp_post).get(mcp_get))
         .route("/v1/models", get(list_models).options(preflight))
         .route("/v1/messages", post(anthropic_messages).options(preflight))
         .route(
@@ -1949,6 +1950,217 @@ async fn test_web_access(
         );
     }
     Ok(checks)
+}
+
+// Local-only, authenticated MCP Streamable HTTP endpoint for Claude Code.
+// The gateway's chat CORS rules are deliberately NOT applied to this route.
+// A local MCP is not a Cowork remote connector and does not change client policy.
+const MCP_SERVER_NAME: &str = "claude-proxy-web";
+const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+
+fn mcp_access_allowed(headers: &HeaderMap, config: &AppConfig) -> Result<(), StatusCode> {
+    let expected_ip = format!("127.0.0.1:{}", config.proxy_port);
+    let expected_localhost = format!("localhost:{}", config.proxy_port);
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(StatusCode::FORBIDDEN)?;
+    if host != expected_ip && host != expected_localhost {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if let Some(origin) = headers.get(header::ORIGIN) {
+        let origin = origin.to_str().map_err(|_| StatusCode::FORBIDDEN)?;
+        if origin != format!("http://{expected_ip}")
+            && origin != format!("http://{expected_localhost}")
+        {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+    if !authorized(headers, config) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if !web_tools_enabled(config) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(())
+}
+
+fn mcp_response(id: &Value, result: Value) -> Response {
+    Json(json!({"jsonrpc":"2.0","id":id,"result":result})).into_response()
+}
+
+fn mcp_error(id: Value, code: i32, message: &'static str) -> Response {
+    Json(json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}}))
+        .into_response()
+}
+
+fn mcp_tool_list() -> Vec<Value> {
+    web_tool_definitions()
+        .iter()
+        .filter_map(|item| item.get("function"))
+        .map(|tool| {
+            json!({
+                "name":tool["name"],
+                "description":tool["description"],
+                "inputSchema":tool["parameters"]
+            })
+        })
+        .collect()
+}
+
+async fn mcp_get(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Response {
+    let config = state.config.read().await.clone();
+    if let Err(status) = mcp_access_allowed(&headers, &config) {
+        return status.into_response();
+    }
+    StatusCode::METHOD_NOT_ALLOWED.into_response()
+}
+
+async fn mcp_post(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(request): Json<Value>,
+) -> Response {
+    let config = state.config.read().await.clone();
+    if let Err(status) = mcp_access_allowed(&headers, &config) {
+        return status.into_response();
+    }
+    if request.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return mcp_error(Value::Null, -32600, "Invalid JSON-RPC request.");
+    }
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let Some(method) = request.get("method").and_then(Value::as_str) else {
+        return mcp_error(id, -32600, "Missing JSON-RPC method.");
+    };
+    if id.is_null() {
+        return if method == "notifications/initialized" {
+            StatusCode::ACCEPTED.into_response()
+        } else {
+            mcp_error(Value::Null, -32600, "Unsupported MCP notification.")
+        };
+    }
+    match method {
+        "initialize" => mcp_response(
+            &id,
+            json!({
+                "protocolVersion":MCP_PROTOCOL_VERSION,
+                "capabilities":{"tools":{"listChanged":false}},
+                "serverInfo":{"name":MCP_SERVER_NAME,"version":env!("CARGO_PKG_VERSION")},
+                "instructions":"Public web search and page reading use Claude Proxy's configured web route. These tools cannot bypass client or organization network restrictions."
+            }),
+        ),
+        "ping" => mcp_response(&id, json!({})),
+        "tools/list" => mcp_response(&id, json!({"tools":mcp_tool_list()})),
+        "tools/call" => {
+            let Some(name) = request.pointer("/params/name").and_then(Value::as_str) else {
+                return mcp_error(id, -32602, "Missing MCP tool name.");
+            };
+            if name != "claude_proxy_web_search" && name != "claude_proxy_web_fetch" {
+                return mcp_error(id, -32602, "Unknown MCP web tool.");
+            }
+            let args = request.pointer("/params/arguments").cloned().unwrap_or(json!({}));
+            if !args.is_object() {
+                return mcp_error(id, -32602, "Tool arguments must be an object.");
+            }
+            let Ok(_permit) = state.web_slots.clone().acquire_owned().await else {
+                return mcp_error(id, -32603, "Web tool capacity unavailable.");
+            };
+            let started = Instant::now();
+            let text = if name == "claude_proxy_web_search" {
+                web_search(&config, &args).await
+            } else {
+                web_fetch(&config, &args).await
+            };
+            let is_error = serde_json::from_str::<Value>(&text)
+                .ok()
+                .is_none_or(|value| value.get("error").is_some());
+            state.observability.log(
+                if is_error { "warning" } else { "info" },
+                "mcp web tool",
+                &format!(
+                    "{}: {} ({} ms).",
+                    if name == "claude_proxy_web_search" {
+                        "search"
+                    } else {
+                        "fetch"
+                    },
+                    if is_error { "failed" } else { "completed" },
+                    started.elapsed().as_millis()
+                ),
+            );
+            mcp_response(
+                &id,
+                json!({
+                    "content":[{"type":"text","text":text}],
+                    "isError":is_error
+                }),
+            )
+        }
+        _ => mcp_error(id, -32601, "MCP method not found."),
+    }
+}
+
+fn register_claude_code_web_mcp(
+    settings: &mut Value,
+    port: u16,
+    token: &str,
+) -> Result<(), String> {
+    if !settings.is_object() {
+        return Err("Claude Code configuration must be a JSON object.".into());
+    }
+    if settings.get("mcpServers").is_some()
+        && !settings.get("mcpServers").is_some_and(Value::is_object)
+    {
+        return Err("Existing Claude Code mcpServers is not a JSON object.".into());
+    }
+    let url = format!("http://127.0.0.1:{port}/mcp");
+    if settings.get("mcpServers").is_none() {
+        settings["mcpServers"] = json!({});
+    }
+    if let Some(existing) = settings["mcpServers"].get(MCP_SERVER_NAME) {
+        if existing.get("url").and_then(Value::as_str) != Some(url.as_str()) {
+            return Err("A different Claude Code MCP server already uses the claude-proxy-web name. It was not overwritten.".into());
+        }
+    }
+    settings["mcpServers"][MCP_SERVER_NAME] = json!({
+        "type":"http",
+        "url":url,
+        "headers":{"Authorization":format!("Bearer {token}")}
+    });
+    Ok(())
+}
+
+#[tauri::command]
+async fn apply_claude_code_web_mcp(
+    app: AppHandle,
+    state: TauriState<'_, BridgeState>,
+) -> Result<String, String> {
+    let config = state.config.read().await.clone();
+    if !web_tools_enabled(&config) {
+        return Err("Enable and save Web access in Advanced settings before connecting tools.".into());
+    }
+    start_proxy_inner(state.inner()).await?;
+    update_status_icon(&app, true);
+    let config = state.config.read().await.clone();
+    let root = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .ok_or_else(|| "The Windows user profile was not found.".to_string())?;
+    let path = root.join(".claude.json");
+    let mut settings = read_json_object(&path)?;
+    register_claude_code_web_mcp(&mut settings, config.proxy_port, &config.gateway_token)?;
+    transactional_writes(vec![(
+        path,
+        serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?,
+    )])?;
+    state.observability.log(
+        "info",
+        "mcp configuration",
+        "Claude Code local web MCP registration was updated after a user action.",
+    );
+    Ok("Claude Code Web MCP was configured. Fully restart Claude Code; then use /mcp to inspect its connection. Cowork remote connectors remain separate.".into())
 }
 
 async fn healthz(State(state): State<ServerState>) -> impl IntoResponse {
@@ -6444,6 +6656,7 @@ pub fn run() {
             stop_proxy,
             test_local_route,
             test_web_access,
+            apply_claude_code_web_mcp,
             apply_claude_desktop,
             apply_claude_cli,
             open_creator_link,
@@ -6761,6 +6974,86 @@ mod tests {
             web_probe_failure("DNS could not resolve"),
             "DNS resolution failed (may differ from proxy DNS)"
         );
+    }
+
+
+    #[test]
+    fn mcp_registration_preserves_other_claude_code_settings_and_tools() {
+        let mut value = json!({
+            "theme":"dark",
+            "mcpServers":{"other":{"type":"stdio","command":"example"}}
+        });
+        register_claude_code_web_mcp(&mut value, 18183, "safe-test-token").unwrap();
+        assert_eq!(value["theme"], "dark");
+        assert_eq!(value["mcpServers"]["other"]["command"], "example");
+        assert_eq!(
+            value["mcpServers"][MCP_SERVER_NAME]["url"],
+            "http://127.0.0.1:18183/mcp"
+        );
+        assert_eq!(
+            value["mcpServers"][MCP_SERVER_NAME]["headers"]["Authorization"],
+            "Bearer safe-test-token"
+        );
+        register_claude_code_web_mcp(&mut value, 18183, "rotated").unwrap();
+        assert_eq!(
+            value["mcpServers"][MCP_SERVER_NAME]["headers"]["Authorization"],
+            "Bearer rotated"
+        );
+        let mut conflict = json!({
+            "mcpServers":{"claude-proxy-web":{"type":"stdio","command":"unrelated"}}
+        });
+        assert!(register_claude_code_web_mcp(&mut conflict, 18183, "x").is_err());
+        assert_eq!(
+            conflict["mcpServers"]["claude-proxy-web"]["command"],
+            "unrelated"
+        );
+    }
+
+    #[test]
+    fn mcp_requires_local_origin_correct_host_auth_and_opt_in() {
+        let mut cfg = AppConfig::default();
+        cfg.proxy_port = 18183;
+        cfg.gateway_token = "test-secret".into();
+        cfg.web_access_mode = "auto".into();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:18183"));
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-secret"),
+        );
+        assert_eq!(mcp_access_allowed(&headers, &cfg), Ok(()));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
+        assert_eq!(
+            mcp_access_allowed(&headers, &cfg),
+            Err(StatusCode::FORBIDDEN)
+        );
+        headers.remove(header::ORIGIN);
+        headers.insert(header::HOST, HeaderValue::from_static("evil.example"));
+        assert_eq!(
+            mcp_access_allowed(&headers, &cfg),
+            Err(StatusCode::FORBIDDEN)
+        );
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:18183"));
+        headers.remove(header::AUTHORIZATION);
+        assert_eq!(
+            mcp_access_allowed(&headers, &cfg),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-secret"),
+        );
+        cfg.web_access_mode = "disabled".into();
+        assert_eq!(
+            mcp_access_allowed(&headers, &cfg),
+            Err(StatusCode::FORBIDDEN)
+        );
+        let tools = mcp_tool_list();
+        assert_eq!(tools.len(), 2);
+        assert!(tools.iter().all(|value| value.get("inputSchema").is_some()));
     }
 
     #[test]
