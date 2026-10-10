@@ -270,6 +270,7 @@ struct BridgeState {
     config: Arc<RwLock<AppConfig>>,
     runtime: Arc<Mutex<Option<RuntimeHandle>>>,
     client: Client,
+    direct_provider_client: Client,
     upstream_clients: Arc<Vec<Client>>,
     upstream_cursor: Arc<AtomicUsize>,
     upstream_slots: Arc<Semaphore>,
