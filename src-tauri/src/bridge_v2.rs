@@ -2469,13 +2469,26 @@ async fn process_anthropic_messages(
             }
         }
 
-        if web_enabled {
+        if local_tools_enabled {
             if let Some(calls) = local_tool_calls(&value) {
+                // A provider may hallucinate a local tool that was never
+                // offered for this request. Validate the ENTIRE batch before
+                // executing any tool: Web permission is never Shell permission.
+                if calls
+                    .iter()
+                    .any(|(_, name, _)| !local_tool_allowed(name, web_enabled, shell_enabled))
+                {
+                    return api_error(
+                        StatusCode::BAD_GATEWAY,
+                        "api_error",
+                        "The provider requested a local tool that is disabled for this request.",
+                    );
+                }
                 if web_round >= WEB_TOOL_MAX_ROUNDS {
                     return api_error(
                         StatusCode::BAD_GATEWAY,
                         "api_error",
-                        "The web tool loop exceeded its safety limit. Start a new request and try a narrower question.",
+                        "The local tool loop exceeded its safety limit. Start a new request and try a narrower question.",
                     );
                 }
                 web_round += 1;
@@ -2491,27 +2504,32 @@ async fn process_anthropic_messages(
                     messages.push(assistant);
                 }
                 for (id, name, arguments) in calls {
-                    let web_permit = match state.web_slots.clone().acquire_owned().await {
+                    let slots = if name == "claude_proxy_shell" {
+                        &state.shell_slots
+                    } else {
+                        &state.web_slots
+                    };
+                    let local_permit = match slots.clone().acquire_owned().await {
                         Ok(permit) => permit,
                         Err(_) => {
                             return api_error(
                                 StatusCode::SERVICE_UNAVAILABLE,
                                 "api_error",
-                                "The proxy is shutting down and cannot run another web tool.",
+                                "The proxy is shutting down and cannot run another local tool.",
                             )
                         }
                     };
-                    let web_started = Instant::now();
+                    let local_started = Instant::now();
                     let result =
                         execute_local_tool(&config, &state.observability, &name, &arguments).await;
-                    drop(web_permit);
+                    drop(local_permit);
                     web_tool_count += 1;
-                    let web_elapsed_ms = web_started.elapsed().as_millis();
+                    let local_elapsed_ms = local_started.elapsed().as_millis();
                     state.observability.log(
                         "info",
                         "web bridge",
                         &format!(
-                            "Request {request_id} ran local {name} tool in {web_elapsed_ms} ms."
+                            "Request {request_id} ran local {name} tool in {local_elapsed_ms} ms."
                         ),
                     );
                     if let Some(messages) =
@@ -3812,6 +3830,14 @@ fn normalize_web_assistant_message(message: &mut Value) {
         if let Some(name_value) = call.pointer_mut("/function/name") {
             *name_value = Value::String(canonical.into());
         }
+    }
+}
+
+fn local_tool_allowed(name: &str, web_enabled: bool, shell_enabled: bool) -> bool {
+    match name {
+        "claude_proxy_web_search" | "claude_proxy_web_fetch" => web_enabled,
+        "claude_proxy_shell" => shell_enabled,
+        _ => false,
     }
 }
 
@@ -6433,6 +6459,16 @@ mod tests {
         assert_eq!(payload["tools"].as_array().unwrap().len(), 1);
         assert_eq!(payload["tools"][0]["function"]["name"], "Read");
         assert!(payload.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn web_access_never_authorizes_host_shell_and_shell_only_mode_works() {
+        assert!(local_tool_allowed("claude_proxy_web_fetch", true, false));
+        assert!(!local_tool_allowed("claude_proxy_shell", true, false));
+        assert!(!local_tool_allowed("claude_proxy_web_search", false, true));
+        assert!(local_tool_allowed("claude_proxy_shell", false, true));
+        assert!(!local_tool_allowed("terminal", true, true));
+        assert!(!local_tool_allowed("Read", true, true));
     }
 
     #[test]
