@@ -83,6 +83,7 @@ struct AppConfig {
     base_url: String,
     api_key: String,
     auth_style: String,
+    provider_network_mode: String,
     upstream_models: Vec<String>,
     routes: Vec<ModelRoute>,
     proxy_port: u16,
@@ -106,6 +107,7 @@ impl Default for AppConfig {
             base_url: String::new(),
             api_key: String::new(),
             auth_style: "bearer".into(),
+            provider_network_mode: default_provider_network_mode(),
             upstream_models: Vec::new(),
             routes: Vec::new(),
             proxy_port: DEFAULT_PORT,
@@ -138,6 +140,8 @@ struct DiskConfig {
     api_key_protected: String,
     #[serde(default = "default_auth_style")]
     auth_style: String,
+    #[serde(default = "default_provider_network_mode")]
+    provider_network_mode: String,
     #[serde(default)]
     upstream_models: Vec<String>,
     #[serde(default)]
@@ -178,6 +182,8 @@ struct ConfigInput {
     #[serde(default)]
     clear_api_key: bool,
     auth_style: String,
+    #[serde(default = "default_provider_network_mode")]
+    provider_network_mode: String,
     #[serde(default)]
     upstream_models: Vec<String>,
     #[serde(default)]
@@ -210,6 +216,7 @@ struct PublicConfig {
     base_url: String,
     api_key_configured: bool,
     auth_style: String,
+    provider_network_mode: String,
     upstream_models: Vec<String>,
     routes: Vec<ModelRoute>,
     proxy_port: u16,
@@ -232,6 +239,7 @@ impl From<&AppConfig> for PublicConfig {
             base_url: config.base_url.clone(),
             api_key_configured: !config.api_key.is_empty(),
             auth_style: config.auth_style.clone(),
+            provider_network_mode: config.provider_network_mode.clone(),
             upstream_models: config.upstream_models.clone(),
             routes: config.routes.clone(),
             proxy_port: config.proxy_port,
@@ -312,6 +320,18 @@ fn default_auth_style() -> String {
 fn default_theme() -> String {
     "light".into()
 }
+fn default_provider_network_mode() -> String {
+    "direct".into()
+}
+
+fn normalize_provider_network_mode(value: &str) -> &'static str {
+    if value.trim().eq_ignore_ascii_case("system") {
+        "system"
+    } else {
+        "direct"
+    }
+}
+
 fn default_port() -> u16 {
     DEFAULT_PORT
 }
@@ -694,6 +714,7 @@ fn load_config(path: &Path) -> AppConfig {
         base_url: disk.base_url,
         api_key: unprotect_secret(&disk.api_key_protected).unwrap_or_default(),
         auth_style: disk.auth_style,
+        provider_network_mode: normalize_provider_network_mode(&disk.provider_network_mode).into(),
         upstream_models: disk.upstream_models,
         routes: normalize_routes(disk.routes),
         proxy_port: if disk.proxy_port == 0 {
@@ -729,6 +750,7 @@ fn persist_config(path: &Path, config: &AppConfig) -> Result<(), String> {
         base_url: config.base_url.clone(),
         api_key_protected: protect_secret(&config.api_key)?,
         auth_style: config.auth_style.clone(),
+        provider_network_mode: config.provider_network_mode.clone(),
         upstream_models: config.upstream_models.clone(),
         routes: config.routes.clone(),
         proxy_port: config.proxy_port,
@@ -984,6 +1006,8 @@ async fn save_config(
         "bearer"
     }
     .into();
+    config.provider_network_mode =
+        normalize_provider_network_mode(&input.provider_network_mode).into();
     config.upstream_models = input
         .upstream_models
         .into_iter()
@@ -1075,6 +1099,7 @@ async fn fetch_models(state: TauriState<'_, BridgeState>) -> Result<Vec<String>,
     if config.base_url != requested_config.base_url
         || config.api_key != requested_config.api_key
         || config.auth_style != requested_config.auth_style
+        || config.provider_network_mode != requested_config.provider_network_mode
     {
         return Err(
             "Provider settings changed while models were being fetched. Please try again.".into(),
@@ -1120,9 +1145,8 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
     let started = Instant::now();
     // A VPN-only operator may explicitly request system proxy mode. In that
     // case do not leak a separate direct TCP probe to the provider.
-    let direct_mode = ProviderProxyMode::from_setting(
-        &std::env::var("CLAUDE_PROXY_PROVIDER_PROXY_MODE").unwrap_or_default(),
-    ) == ProviderProxyMode::Direct;
+    let direct_mode =
+        ProviderProxyMode::from_setting(&config.provider_network_mode) == ProviderProxyMode::Direct;
     let (tcp_ms, response) = tokio::join!(
         async {
             if direct_mode {
@@ -1131,16 +1155,24 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
                 None
             }
         },
-        send_provider_with_fallback(request, &state.direct_provider_client, &state.observability,)
+        send_provider_with_fallback(
+            request,
+            &state.direct_provider_client,
+            &state.observability,
+            &config,
+        )
     );
-    let response = response.map_err(|error| {
-        state.observability.log(
-            "error",
-            "provider ping",
-            "Provider API ping failed before receiving an HTTP response.",
-        );
-        format!("Could not reach the provider API: {error}")
-    })?;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            state.observability.log(
+                "error",
+                "provider ping",
+                "Provider API check failed before receiving an HTTP response.",
+            );
+            return Err(diagnose_provider_transport(&url, &config, &error).await);
+        }
+    };
     let status = response.status();
     let elapsed = started.elapsed().as_millis();
     if !status.is_success() {
@@ -1251,6 +1283,7 @@ async fn probe_provider_fidelity(state: TauriState<'_, BridgeState>) -> Result<V
             request,
             &state.direct_provider_client,
             &state.observability,
+            &config,
         )
         .await
         .map_err(|err| format!("Isolated model probe could not connect: {err}"))?;
@@ -1301,6 +1334,52 @@ async fn probe_provider_fidelity(state: TauriState<'_, BridgeState>) -> Result<V
     Ok(results)
 }
 
+// A failed HTTP request is not an HTTP status. Diagnose DNS and TCP locally
+// and separately; never guess TLS failure if only TCP was tested. The optional
+// system route must not trigger an unrelated direct DNS/TCP probe.
+async fn diagnose_provider_transport(
+    endpoint: &str,
+    config: &AppConfig,
+    error: &reqwest::Error,
+) -> String {
+    if normalize_provider_network_mode(&config.provider_network_mode) == "system" {
+        return "PROVIDER_SYSTEM_ROUTE: اتصال از مسیر پراکسی سیستم برقرار نشد. وضعیت پراکسی ویندوز و پورت آن را بررسی کنید یا مسیر مستقیم را انتخاب کنید.".into();
+    }
+    let Some((host, port)) = Url::parse(endpoint)
+        .ok()
+        .and_then(|url| Some((url.host_str()?.to_owned(), url.port_or_known_default()?)))
+    else {
+        return "PROVIDER_URL: نشانی API ارائه‌دهنده معتبر نیست.".into();
+    };
+    let resolved = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::lookup_host((host.as_str(), port)),
+    )
+    .await;
+    let addresses: Vec<std::net::SocketAddr> = match resolved {
+        Ok(Ok(result)) => result.take(8).collect(),
+        _ => {
+            return "PROVIDER_DNS: تبدیل نام دامنه به IP در ویندوز ناموفق بود. DNS سیستم و اتصال شبکه را بررسی کنید.".into();
+        }
+    };
+    if addresses.is_empty() {
+        return "PROVIDER_DNS: هیچ آدرس IP برای دامنه پیدا نشد. تنظیمات DNS را بررسی کنید.".into();
+    }
+    let tcp = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect(addresses.as_slice()),
+    )
+    .await;
+    if !matches!(tcp, Ok(Ok(_))) {
+        return "PROVIDER_TCP: دامنه به IP تبدیل شد اما اتصال TCP مستقیم برقرار نشد. مسیر اینترنت، IPv4/IPv6 و فایروال را بررسی کنید. پراکسی وب به صورت خودکار به API اعمال نمی‌شود.".into();
+    }
+    if error.is_timeout() {
+        "PROVIDER_TIMEOUT: DNS و TCP مستقیم کار می‌کنند، ولی درخواست HTTPS به‌موقع کامل نشد. TLS، سرعت پاسخ سرور یا مسیر شبکه را بررسی کنید.".into()
+    } else {
+        "PROVIDER_TLS_OR_HTTP: DNS و TCP مستقیم برقرار است، اما تبادل HTTPS شکست خورد. گواهی TLS، محدودیت شبکه یا ارتباط سرور را بررسی کنید؛ خطای TLS هنوز قطعی نیست.".into()
+    }
+}
+
 async fn fetch_upstream_models(
     client: &Client,
     direct: &Client,
@@ -1308,11 +1387,12 @@ async fn fetch_upstream_models(
     observability: &ObservabilityStore,
 ) -> Result<Vec<String>, String> {
     let url = upstream_url(&config.base_url, "models")?;
-    let mut request = client.get(url).timeout(Duration::from_secs(30));
+    let mut request = client.get(&url).timeout(Duration::from_secs(30));
     request = add_upstream_auth(request, config)?;
-    let response = send_provider_with_fallback(request, direct, observability)
-        .await
-        .map_err(|error| format!("Could not connect to the model provider: {error}"))?;
+    let response = match send_provider_with_fallback(request, direct, observability, config).await {
+        Ok(response) => response,
+        Err(error) => return Err(diagnose_provider_transport(&url, config, &error).await),
+    };
     let status = response.status();
     let body = response
         .text()
@@ -2158,6 +2238,7 @@ async fn process_anthropic_messages(
                 outgoing.json(&payload),
                 &state.direct_provider_client,
                 &state.observability,
+                &config,
             )
             .await
             {
@@ -5077,6 +5158,7 @@ async fn fetch_continuation(
             request.json(&payload),
             direct,
             observability,
+            config,
         )
         .await
         {
@@ -5747,21 +5829,21 @@ impl ProviderProxyMode {
     }
 }
 
-// Provider requests are DIRECT by default. The separate Web Search proxy
-// is applied only in build_web_client and never leaks into provider traffic.
-// Advanced administrators may explicitly opt into system/auto via env var.
-// The user's system may retain HTTPS_PROXY pointing to a stopped local VPN.
-// Only retry failed connection establishment, never an HTTP error or a
-// possibly-sent request that timed out while waiting for a response.
+// One explicit, persisted policy for model listing, inference and continuation.
+// Web Search has an independent client. No silent proxy fallback.
 async fn send_provider_with_fallback(
     request: reqwest::RequestBuilder,
     direct: &Client,
     observability: &ObservabilityStore,
+    config: &AppConfig,
 ) -> Result<reqwest::Response, reqwest::Error> {
-    let mode = ProviderProxyMode::from_setting(
-        &std::env::var("CLAUDE_PROXY_PROVIDER_PROXY_MODE").unwrap_or_default(),
-    );
-    send_provider_with_mode(request, direct, observability, mode).await
+    send_provider_with_mode(
+        request,
+        direct,
+        observability,
+        ProviderProxyMode::from_setting(&config.provider_network_mode),
+    )
+    .await
 }
 
 async fn send_provider_with_mode(
@@ -6287,6 +6369,27 @@ mod tests {
         assert_eq!(converted["content"][0]["text"], "hello");
         assert_eq!(converted["usage"]["input_tokens"], 4);
         assert_eq!(converted["stop_reason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn direct_connection_failure_reports_tcp_stage_without_false_tls_claim() {
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = dead.local_addr().unwrap().port();
+        drop(dead);
+        let url = format!("http://127.0.0.1:{port}/v1/models");
+        let client = build_direct_provider_client().unwrap();
+        let error = client.get(&url).send().await.unwrap_err();
+        let report = diagnose_provider_transport(&url, &AppConfig::default(), &error).await;
+        assert!(report.starts_with("PROVIDER_TCP:"), "{report}");
+        assert!(!report.contains("PROVIDER_TLS_OR_HTTP:"));
+    }
+
+    #[test]
+    fn provider_route_mode_is_persistent_and_defaults_to_direct() {
+        let legacy: DiskConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.provider_network_mode, "direct");
+        assert_eq!(normalize_provider_network_mode("SYSTEM"), "system");
+        assert_eq!(normalize_provider_network_mode("auto"), "direct");
     }
 
     #[test]

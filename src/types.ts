@@ -1,4 +1,5 @@
 export type AuthStyle = "bearer" | "api_key";
+export type ProviderNetworkMode = "direct" | "system";
 export type Theme = "light" | "dark";
 export type WebAccessMode = "disabled" | "auto" | "required";
 export type WebProxyMode = "direct" | "manual";
@@ -18,6 +19,7 @@ export type BridgeConfig = {
   baseUrl: string;
   apiKeyConfigured: boolean;
   authStyle: AuthStyle;
+  providerNetworkMode: ProviderNetworkMode;
   upstreamModels: string[];
   routes: ModelRoute[];
   proxyPort: number;
@@ -81,6 +83,7 @@ export const emptyConfig: BridgeConfig = {
   baseUrl: "",
   apiKeyConfigured: false,
   authStyle: "bearer",
+  providerNetworkMode: "direct",
   upstreamModels: [],
   routes: [],
   proxyPort: 18181,

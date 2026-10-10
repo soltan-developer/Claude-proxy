@@ -431,3 +431,24 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
   .sidebar { width: var(--sidebar-width); flex-basis: var(--sidebar-width); }
   .page-content { padding: 22px 16px 34px; }
 }
+
+/* Provider setup is one focused workflow; technical diagnostics live elsewhere. */
+.provider-settings { width: 100%; max-width: 820px; margin-inline: auto; min-width: 0; }
+.provider-connection-card { min-width: 0; }
+.provider-connection-card .form-grid { padding-bottom: 12px; }
+.provider-network-options { border-top: 1px solid var(--line); padding: 14px 0; }
+.provider-network-options summary { cursor: pointer; color: var(--ink); font-size: 13px; font-weight: 600; }
+.provider-network-options > .field { margin-top: 16px; max-width: 520px; }
+.provider-check-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; padding-top: 16px; border-top: 1px solid var(--line); }
+.provider-check-result { margin-top: 14px; border: 1px solid var(--line); border-inline-start: 3px solid var(--accent); background: var(--surface); padding: 12px 14px; border-radius: 7px; overflow-wrap: anywhere; }
+.provider-check-result strong { display: block; color: var(--ink); margin-bottom: 4px; font-size: 13px; }
+.provider-check-result p { color: var(--muted); font-size: 12px; margin: 0; line-height: 1.9; }
+.provider-check-ok { border-inline-start-color: var(--green); }
+.provider-check-fail { border-inline-start-color: var(--red); }
+.context-advanced-card .button-row { padding-top: 10px; }
+@media (max-width: 600px) {
+  .provider-settings { max-width: 100%; }
+  .provider-check-actions > button { width: 100%; }
+  .provider-connection-card .form-grid { grid-template-columns: minmax(0, 1fr); }
+  .provider-connection-card .field { grid-column: 1 / -1; }
+}

@@ -18,13 +18,10 @@ import {
   loadConfig,
   openCreatorLink,
   pingProvider,
-  probeProviderFidelity,
-  type ProviderProbeResult,
   quitApplication,
   saveConfig,
   startProxy,
   stopProxy,
-  testLocalRoute,
   testWebAccess,
 } from "./lib/tauri";
 import { emptyConfig, routeRoles, type BridgeConfig, type ModelRoute, type ProxyStatus } from "./types";
@@ -57,7 +54,7 @@ function App() {
   const [wizardStep, setWizardStep] = useState(0);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
-  const [providerProbeResults, setProviderProbeResults] = useState<ProviderProbeResult[]>([]);
+  const [connectionFeedback, setConnectionFeedback] = useState<{ ok: boolean; message: string } | null>(null);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const [toastTone, setToastTone] = useState<ToastTone>("success");
@@ -223,15 +220,26 @@ function App() {
   async function handleFetchModels() {
     setBusy("fetch");
     setError("");
+    setConnectionFeedback(null);
     try {
       await persist(draft, draft.setupComplete);
       const models = await fetchModels();
       const updated = await loadConfig();
       setConfig(updated);
       setDraft(updated);
-      showToast(`${models.length} ${models.length === 1 ? "model" : "models"} retrieved from the provider.`);
-    } catch (reason) { setError(messageOf(reason)); }
-    finally { setBusy(""); }
+      setConnectionFeedback({
+        ok: true,
+        message: language === "fa"
+          ? `اتصال API برقرار است و ${models.length} مدل دریافت شد.`
+          : `Provider API connected. Retrieved ${models.length} models.`,
+      });
+    } catch (reason) {
+      const message = messageOf(reason);
+      setConnectionFeedback({ ok: false, message });
+      if (wizard) setError(message);
+    } finally {
+      setBusy("");
+    }
   }
 
   async function handlePingProvider() {
@@ -240,19 +248,6 @@ function App() {
     try {
       await persist(draft, draft.setupComplete);
       showToast(await pingProvider());
-    } catch (reason) { setError(messageOf(reason)); }
-    finally { setBusy(""); }
-  }
-
-  async function handleProbeProvider() {
-    setBusy("probe");
-    setError("");
-    setProviderProbeResults([]);
-    try {
-      await persist(draft, draft.setupComplete);
-      const results = await probeProviderFidelity();
-      setProviderProbeResults(results);
-      showToast(results.every((result) => result.passed) ? "Isolated model probes passed." : "At least one direct model probe did not follow instructions.", results.every((result) => result.passed) ? "success" : "error");
     } catch (reason) { setError(messageOf(reason)); }
     finally { setBusy(""); }
   }
@@ -387,7 +382,7 @@ function App() {
           ) : page === "overview" ? (
             <Overview config={config} draft={draft} status={status} localUrl={localUrl} ready={ready} onCopy={() => void copy(localUrl)} onGo={(target) => setPage(target)} onWizard={() => { setWizard(true); setWizardStep(0); }} />
           ) : page === "connection" ? (
-            <ConnectionPage language={language} draft={draft} setDraft={setDraft} secret={secret} setSecret={setSecret} clearSecret={clearSecret} setClearSecret={setClearSecret} busy={busy} isTauri={isTauriRuntime()} onSave={() => void saveCurrent()} onFetch={() => void handleFetchModels()} onPing={() => void handlePingProvider()} onProbe={() => void handleProbeProvider()} probeResults={providerProbeResults} onTest={() => void act("test", testLocalRoute, (result) => String(result))} />
+            <ConnectionPage language={language} draft={draft} setDraft={setDraft} secret={secret} setSecret={setSecret} clearSecret={clearSecret} setClearSecret={setClearSecret} busy={busy} isTauri={isTauriRuntime()} onSave={() => void saveCurrent()} onFetch={() => void handleFetchModels()} feedback={connectionFeedback} />
           ) : page === "models" ? (
             <ModelsPage draft={draft} setDraft={setDraft} newRole={newRole} setNewRole={setNewRole} newModel={newModel} setNewModel={setNewModel} addRoute={addRoute} updateRoute={updateRoute} removeRoute={removeRoute} onSave={() => void saveCurrent()} onFetch={() => void handleFetchModels()} onPing={() => void handlePingProvider()} busy={busy} />
           ) : page === "clients" ? (
@@ -482,6 +477,13 @@ function AdvancedPage({ language, draft, setDraft, busy, isTauri, onSave, onAppl
         <div className="web-route-list"><div><span className="web-route-number">01</span><div><strong>Model API</strong><small>Uses your provider URL and API key.</small></div></div><div><span className="web-route-number">02</span><div><strong>Web bridge</strong><small>Uses Direct or the proxy address above.</small></div></div></div>
         <div className="info-note web-bridge-note"><span>i</span><p>Only public HTTP(S) pages are allowed. Localhost, private IPs, metadata services, and credentials in URLs are blocked before a request is sent.</p></div>
       </aside>
+      <section className="card form-card context-advanced-card">
+        <div className="section-title"><div><h2>{language === "fa" ? "مدیریت گفت‌وگوهای طولانی" : "Long conversation context"}</h2></div></div>
+        <div className="toggle-row"><div><strong>{language === "fa" ? "تنظیم خودکار ظرفیت زمینه" : "Automatically fit long conversations"}</strong>
+          <p>{language === "fa" ? "در صورت نیاز، قدیمی‌ترین نوبت‌های کامل از درخواست بعدی کنار گذاشته می‌شوند؛ تاریخچهٔ نمایشی Claude تغییری نمی‌کند." : "When needed, omit the oldest complete turns from future upstream requests without changing Claude's visible history."}</p>
+        </div><button role="switch" aria-checked={draft.autoTrimOnContextOverflow} className={`switch ${draft.autoTrimOnContextOverflow ? "switch-on" : ""}`} onClick={() => setDraft((current) => ({ ...current, autoTrimOnContextOverflow: !current.autoTrimOnContextOverflow }))}><span /></button></div>
+        <div className="button-row"><button className="button button-secondary" disabled={Boolean(busy)} onClick={onSave}>{language === "fa" ? "ذخیره" : "Save"}</button></div>
+      </section>
       <section className="card form-card output-limit-card">
         <div className="section-title"><span className="title-icon output-limit-icon" aria-hidden="true">↥</span><div><h2>Claude output limit</h2><p>Set the maximum output token value for future Claude sessions.</p></div></div>
         <div className="output-limit-layout">
@@ -534,11 +536,22 @@ function Overview({ config, draft, status, localUrl, ready, onCopy, onGo, onWiza
   </>;
 }
 
-function ConnectionPage({ language, draft, setDraft, secret, setSecret, clearSecret, setClearSecret, busy, isTauri, onSave, onFetch, onPing, onProbe, probeResults, onTest }: {
-  language: Language; draft: Draft; setDraft: Dispatch<SetStateAction<Draft>>; secret: string; setSecret: (value: string) => void; clearSecret: boolean; setClearSecret: (value: boolean) => void; busy: string; isTauri: boolean; onSave: () => void; onFetch: () => void; onPing: () => void; onProbe: () => void; probeResults: ProviderProbeResult[]; onTest: () => void;
+function ConnectionPage({ language, draft, setDraft, secret, setSecret, clearSecret, setClearSecret, busy, isTauri, onSave, onFetch, feedback }: {
+  language: Language;
+  draft: Draft;
+  setDraft: Dispatch<SetStateAction<Draft>>;
+  secret: string;
+  setSecret: (value: string) => void;
+  clearSecret: boolean;
+  setClearSecret: (value: boolean) => void;
+  busy: string;
+  isTauri: boolean;
+  onSave: () => void;
+  onFetch: () => void;
+  feedback: { ok: boolean; message: string } | null;
 }) {
   const [showSecret, setShowSecret] = useState(false);
-
+  const fa = language === "fa";
   function toggleClearSecret() {
     if (clearSecret) {
       setClearSecret(false);
@@ -550,57 +563,72 @@ function ConnectionPage({ language, draft, setDraft, secret, setSecret, clearSec
       setSecret("");
     }
   }
-
-  return <>
-    <div className="page-heading compact-heading"><div><span className="eyebrow">PROVIDER CONNECTION</span><h1>Configure provider</h1><p>Enter an OpenAI-compatible API URL and authentication details.</p></div></div>
-    <div className="settings-grid">
-      <section className="card form-card">
-        <div className="section-title"><span className="title-icon" aria-hidden="true"><svg viewBox="0 0 18 18" focusable="false"><path d="M6.2 5.1 3.5 7.8a3 3 0 0 0 4.2 4.2l2-2M11.8 12.9l2.7-2.7a3 3 0 0 0-4.2-4.2l-2 2M6 9h6" /></svg></span><div><h2>Provider details</h2><p>These values are stored on this device.</p></div></div>
-        <div className="form-grid">
-          <label className="field span-two"><span>Provider name <small>Optional</small></span><input value={draft.providerName} onChange={(e) => setDraft((c) => ({ ...c, providerName: e.target.value }))} placeholder="For example, internal gateway" /></label>
-          <label className="field span-two"><span>Base API URL</span><input dir="ltr" value={draft.baseUrl} onChange={(e) => setDraft((c) => ({ ...c, baseUrl: e.target.value }))} placeholder="https://gateway.example/v1" autoCapitalize="off" spellCheck={false} /><small className="field-hint">You can include or omit /v1; Claude Proxy detects it automatically.</small></label>
-          <div className="field span-two api-key-field">
-            <div className="api-key-heading">
-              <label htmlFor="provider-api-key"><span>API key <small>{draft.apiKeyConfigured && !secret ? "Saved and protected" : ""}</small></span></label>
-            </div>
-            <div className="secret-row">
-              <div className={`secret-control ${draft.apiKeyConfigured && !clearSecret ? "secret-control-saved" : ""}`}>
-                <input id="provider-api-key" className="api-key-input" dir="ltr" disabled={draft.apiKeyConfigured && !clearSecret} type={showSecret ? "text" : "password"} value={secret} onChange={(e) => { setSecret(e.target.value); setClearSecret(false); }} placeholder={draft.apiKeyConfigured && !clearSecret ? "Saved API key is protected" : draft.apiKeyConfigured ? "Enter a replacement API key" : "Provider API key"} autoComplete="new-password" />
-                <button type="button" className="secret-toggle" disabled={draft.apiKeyConfigured && !clearSecret} onClick={() => setShowSecret((value) => !value)} aria-pressed={showSecret} aria-label={showSecret ? "Hide API key" : "Show API key"}>{showSecret ? "Hide" : "Show"}</button>
-              </div>
-              {draft.apiKeyConfigured && <button type="button" className={`clear-key-icon ${clearSecret ? "clear-key-icon-active" : ""}`} aria-pressed={clearSecret} onClick={toggleClearSecret} aria-label={clearSecret ? "Keep saved key" : "Remove saved key"} title={clearSecret ? "Keep saved key" : "Remove saved key"}><span aria-hidden="true">{clearSecret ? "↶" : "×"}</span></button>}
-            </div>
-            <small className="field-hint">The key is protected with Windows account encryption and is never shown again in the interface.</small>
-          </div>
-          <label className="field"><span>Authentication</span><ThemeSelect value={draft.authStyle} options={[{ value: "bearer", label: "Bearer token" }, { value: "api_key", label: "api-key header" }]} onChange={(value) => setDraft((c) => ({ ...c, authStyle: value as BridgeConfig["authStyle"] }))} /></label>
-          <label className="field"><span>Local port</span><input dir="ltr" type="number" min="1024" max="65535" value={draft.proxyPort} onChange={(e) => setDraft((c) => ({ ...c, proxyPort: Math.min(65535, Math.max(1024, Number(e.target.value) || 18181)) }))} /><small className="field-hint">The default is 18181. Choose another available port if it is in use. Apply the Claude settings again after changing it.</small></label>
-        </div>
-        <div className="button-row connection-actions"><button className="button button-primary" disabled={Boolean(busy)} onClick={onSave}>{busy === "save" ? "Saving…" : "Save settings"}</button><button className="button button-secondary" disabled={!isTauri || Boolean(busy)} onClick={onFetch}>{busy === "fetch" ? "Checking…" : "Check connection and fetch models"}</button><button className="button button-secondary" disabled={!isTauri || Boolean(busy)} onClick={onPing}>{busy === "ping" ? "Checking API…" : "Check API + direct TCP timing"}</button></div>
-        <p className="field-hint">Direct TCP connection time is measured separately from the authenticated /v1/models API response time. Neither is ICMP ping. Provider API requests bypass v2rayN by default; only Web Search may use its configured proxy.</p>
-        <div className="button-row connection-actions">
-          <button className="button button-secondary" disabled={!isTauri || Boolean(busy)} onClick={onProbe}>{busy === "probe" ? "Testing model…" : "Test upstream model instructions (2 requests)"}</button>
-        </div>
-        <p className="field-hint">This optional test sends two small, synthetic prompts to the mapped default upstream model using the provider network policy (direct by default). It uses no chat history, local tools or Web Search; provider usage fees may apply. PASS verifies marker position, basic writing-script presence and absence of tool calls; it does not certify full language comprehension.</p>
-        {probeResults.length > 0 && <section className="card form-card" aria-label="Isolated provider fidelity results">
-          <h3>Isolated upstream model results</h3>
-          {probeResults.map((result) => <div key={result.marker} className="field-hint">
-            <strong>{result.passed ? "PASS" : "FAIL"} — {result.language} / {result.marker}</strong>
-            <div>Requested: {result.requestedModel} · Reported: {result.model} · Response ID: {result.responseId}</div>
-            <div>{result.responseMs} ms · tool calls: {result.toolCalls} · Marker at end: {String(result.markerAtEnd)} · Language script: {String(result.scriptDetected)}</div>
-            <div dir="auto" style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>{result.reply || "(empty provider reply)"}</div>
-          </div>)}
-        </section>}
-        {!isTauri && <p className="preview-note">Live connections are unavailable in the browser preview. Use the Windows app.</p>}
-      </section>
-      <section className="card form-card overflow-card">
-        <div className="section-title"><span className="title-icon warm-icon" aria-hidden="true"><svg viewBox="0 0 18 18" focusable="false"><path d="M14.5 7.3A5.5 5.5 0 1 0 15 10" /><path d="M14.5 3.5v3.8h-3.8" /></svg></span><div><h2>Continue when the context limit is reached</h2><p>For long conversations</p></div></div>
-        <div className="toggle-row"><div><strong>Automatically fit long conversations</strong><p>Before sending, Claude Proxy estimates the context budget and removes the oldest complete turns when needed. It retries only if the provider still reports an overflow.</p></div><button role="switch" aria-checked={draft.autoTrimOnContextOverflow} className={`switch ${draft.autoTrimOnContextOverflow ? "switch-on" : ""}`} onClick={() => setDraft((c) => ({ ...c, autoTrimOnContextOverflow: !c.autoTrimOnContextOverflow }))}><span /></button></div>
-        <div className="info-note"><span>i</span><p>Claude's visible history is not changed. Older messages are omitted only from future requests to the model. Include a summary when older details are needed.</p></div>
-        <div className="port-note"><div><strong>Local proxy port</strong><span>Available only on this computer.</span></div><code dir="ltr">127.0.0.1:{draft.proxyPort}</code></div>
-      <div className="button-row secondary-row"><button className="button button-secondary" disabled={!isTauri || Boolean(busy)} onClick={onTest}>Test local proxy</button><span className="field-hint sidebar-action-note">Use the proxy status control in the sidebar to start or stop the local gateway.</span></div>
-      </section>
+  return <div className="provider-settings">
+    <div className="page-heading compact-heading">
+      <div>
+        <span className="eyebrow">PROVIDER CONNECTION</span>
+        <h1>{fa ? "اتصال به ارائه‌دهنده" : "Provider connection"}</h1>
+        <p>{fa ? "نشانی API و کلید را وارد کنید؛ بررسی اتصال و دریافت مدل‌ها در یک مرحله انجام می‌شود." : "Configure the provider and check connectivity in one step."}</p>
+      </div>
     </div>
-  </>;
+    <section className="card form-card provider-connection-card">
+      <div className="section-title"><div>
+        <h2>{fa ? "تنظیمات اصلی" : "Connection settings"}</h2>
+        <p>{fa ? "تنظیمات و کلید رمزنگاری‌شده فقط روی دستگاه ذخیره می‌شوند." : "Settings and the encrypted API key stay on this device."}</p>
+      </div></div>
+      <div className="form-grid">
+        <label className="field span-two">
+          <span>{fa ? "نام ارائه‌دهنده (اختیاری)" : "Provider name (optional)"}</span>
+          <input value={draft.providerName} onChange={(event) => setDraft((current) => ({ ...current, providerName: event.target.value }))} placeholder={fa ? "مثلاً مرکز" : "Example provider"} />
+        </label>
+        <label className="field span-two">
+          <span>{fa ? "نشانی API" : "Base API URL"}</span>
+          <input dir="ltr" value={draft.baseUrl} onChange={(event) => setDraft((current) => ({ ...current, baseUrl: event.target.value }))} placeholder="https://gateway.example/api/v1" autoCapitalize="off" spellCheck={false} />
+          <small className="field-hint">{fa ? "پسوند /v1 اختیاری است. برنامه آن را فقط در صورت نیاز اضافه می‌کند." : "The /v1 suffix may be omitted."}</small>
+        </label>
+        <div className="field span-two api-key-field">
+          <label htmlFor="provider-api-key"><span>{fa ? "کلید API" : "API key"} {draft.apiKeyConfigured && !clearSecret ? (fa ? "· ذخیره‌شده" : "· protected") : ""}</span></label>
+          <div className="secret-row">
+            <div className={`secret-control ${draft.apiKeyConfigured && !clearSecret ? "secret-control-saved" : ""}`}>
+              <input id="provider-api-key" className="api-key-input" dir="ltr" disabled={draft.apiKeyConfigured && !clearSecret} type={showSecret ? "text" : "password"} value={secret}
+                onChange={(event) => { setSecret(event.target.value); setClearSecret(false); }}
+                placeholder={draft.apiKeyConfigured && !clearSecret ? (fa ? "کلید به‌صورت امن ذخیره شده است" : "Saved API key is protected") : (fa ? "کلید ارائه‌دهنده" : "Provider API key")} autoComplete="new-password" />
+              <button type="button" className="secret-toggle" disabled={draft.apiKeyConfigured && !clearSecret} onClick={() => setShowSecret((value) => !value)}>{showSecret ? (fa ? "پنهان" : "Hide") : (fa ? "نمایش" : "Show")}</button>
+            </div>
+            {draft.apiKeyConfigured && <button type="button" className="clear-key-icon" onClick={toggleClearSecret} title={fa ? "حذف یا جایگزینی کلید" : "Remove or replace key"} aria-label={fa ? "حذف یا جایگزینی کلید" : "Remove or replace key"}>{clearSecret ? "↶" : "×"}</button>}
+          </div>
+        </div>
+        <label className="field">
+          <span>{fa ? "نوع احراز هویت" : "Authentication"}</span>
+          <ThemeSelect value={draft.authStyle} options={[{ value: "bearer", label: "Bearer" }, { value: "api_key", label: "api-key" }]} onChange={(value) => setDraft((current) => ({ ...current, authStyle: value as BridgeConfig["authStyle"] }))} />
+        </label>
+        <label className="field">
+          <span>{fa ? "درگاه محلی" : "Local port"}</span>
+          <input dir="ltr" type="number" min="1024" max="65535" value={draft.proxyPort} onChange={(event) => setDraft((current) => ({ ...current, proxyPort: Math.min(65535, Math.max(1024, Number(event.target.value) || 18181)) }))} />
+        </label>
+      </div>
+      <details className="provider-network-options">
+        <summary>{fa ? "تنظیمات پیشرفتهٔ مسیر اتصال" : "Advanced connection routing"}</summary>
+        <label className="field">
+          <span>{fa ? "مسیر اتصال API مدل" : "Model API transport"}</span>
+          <ThemeSelect value={draft.providerNetworkMode} options={[
+            { value: "direct", label: fa ? "مستقیم (پیش‌فرض)" : "Direct (default)" },
+            { value: "system", label: fa ? "پراکسی سیستم (با انتخاب شما)" : "System proxy (explicit)" },
+          ]} onChange={(value) => setDraft((current) => ({ ...current, providerNetworkMode: value as BridgeConfig["providerNetworkMode"] }))} />
+          <small className="field-hint">{fa ? "این گزینه مستقل از پراکسی Web Search است. فقط اگر عمداً می‌خواهید API از پراکسی سیستم عبور کند، حالت دوم را انتخاب کنید." : "Independent from Web Search. System mode uses the operating system proxy only when you explicitly select it."}</small>
+        </label>
+      </details>
+      <div className="provider-check-actions">
+        <button className="button button-primary" disabled={!isTauri || Boolean(busy)} onClick={onFetch}>{busy === "fetch" ? (fa ? "در حال بررسی…" : "Checking…") : (fa ? "بررسی اتصال و دریافت مدل‌ها" : "Check connection and load models")}</button>
+        <button className="button button-secondary" disabled={Boolean(busy)} onClick={onSave}>{busy === "save" ? (fa ? "در حال ذخیره…" : "Saving…") : (fa ? "ذخیره تنظیمات" : "Save settings")}</button>
+      </div>
+      {feedback && <div role={feedback.ok ? "status" : "alert"} className={`provider-check-result ${feedback.ok ? "provider-check-ok" : "provider-check-fail"}`}>
+        <strong>{feedback.ok ? (fa ? "اتصال برقرار است" : "Connected") : (fa ? "اتصال برقرار نشد" : "Connection failed")}</strong>
+        <p dir="auto">{feedback.message}</p>
+      </div>}
+      {!isTauri && <p className="preview-note">{fa ? "بررسی اتصال فقط در برنامه ویندوز انجام می‌شود." : "Connection checks require the Windows application."}</p>}
+    </section>
+  </div>;
 }
 
 function ModelCombobox({ value, models, onChange, placeholder }: { value: string; models: string[]; onChange: (value: string) => void; placeholder: string }) {
