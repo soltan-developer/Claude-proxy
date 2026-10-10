@@ -641,11 +641,17 @@ fn classify_web_intent(request: &Value) -> WebIntent {
                 message.get("content").unwrap_or(&Value::Null),
             ))
     });
-    // Greetings, small talk, and ordinary questions should not pull the web
-    // tools and bridge instructions into the request at all. The bridge is
-    // only relevant when the user points at a repository or explicitly asks
-    // for information that may have changed since the model's knowledge.
-    if !github_was_in_chat && !asks_for_fresh_information(&latest_user_text) {
+    // Each new turn determines tool intent. An old GitHub mention is context,
+    // not permission to inject web tools into a new greeting or a language-only
+    // instruction (which can otherwise trigger a fresh unrelated search).
+    // Preserve explicit follow-ups about an earlier repository.
+    let current_repo_intent = mentions_github_or_repository(&latest_user_text);
+    let current_fresh_intent = asks_for_fresh_information(&latest_user_text);
+    let explicit_repo_followup = github_was_in_chat
+        && (asks_to_revisit_repository(&latest_user_text)
+            || asks_for_contextual_opinion(&latest_user_text)
+            || asks_for_new_search(&latest_user_text));
+    if !current_repo_intent && !current_fresh_intent && !explicit_repo_followup {
         return WebIntent::NoWeb;
     }
     if github_was_in_chat && asks_to_revisit_repository(&latest_user_text) {
@@ -1757,6 +1763,19 @@ async fn process_anthropic_messages(
     // client tools, historical tool results, and optional local gateway tools.
     // They never guess from model names or silently degrade Code into chat.
     let web_intent = classify_web_intent(&request);
+    // Store only routing decisions and counts. Never log the current prompt,
+    // previous messages, tool arguments, account secrets or file paths.
+    if state.v2_contract_mode != ContractMode::Off {
+        state.observability.log(
+            "info",
+            "v2 tool routing",
+            &format!(
+                "Request {request_id}: web_intent={web_intent:?}, client_tool_definitions={}, client_message_count={}.",
+                request.get("tools").and_then(Value::as_array).map_or(0, Vec::len),
+                request.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
+            ),
+        );
+    }
     let web_enabled = add_web_tools(&mut payload, &config, web_intent);
     let shell_enabled = add_shell_tool(&mut payload, &config);
     let local_tools_enabled = web_enabled || shell_enabled;
@@ -5963,13 +5982,51 @@ mod tests {
     }
 
     #[test]
-    fn repository_mentions_bypass_the_simple_message_gate() {
+    fn old_repository_context_does_not_trigger_web_on_new_greeting() {
         let request = json!({ "messages": [
             { "role": "user", "content": "ببین توی این ریپو چه کدی هست" },
             { "role": "assistant", "content": "ok" },
             { "role": "user", "content": "سلام" }
         ] });
-        assert_ne!(classify_web_intent(&request), WebIntent::NoWeb);
+        assert_eq!(classify_web_intent(&request), WebIntent::NoWeb);
+        let mut config = AppConfig::default();
+        config.web_access_mode = "required".into();
+        let mut payload = json!({ "messages": [{ "role": "user", "content": "سلام" }] });
+        assert!(!add_web_tools(&mut payload, &config, classify_web_intent(&request)));
+        assert!(payload.get("tools").is_none());
+        assert!(payload.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn old_repository_context_does_not_trigger_web_on_language_only_turns() {
+        for directive in [
+            "فقط به فارسی پاسخ بده و عبارت FA-527 را در پایان بنویس.",
+            "请只用中文回答，并在结尾写 ZH-884",
+            "hello",
+        ] {
+            let request = json!({ "messages": [
+                { "role": "user", "content": "Please search GitHub for an API project" },
+                { "role": "assistant", "content": "I found some candidates." },
+                { "role": "user", "content": directive }
+            ] });
+            assert_eq!(classify_web_intent(&request), WebIntent::NoWeb);
+        }
+    }
+
+    #[test]
+    fn explicit_revisit_of_previous_repository_still_enables_web() {
+        let request = json!({ "messages": [
+            { "role": "user", "content": "Review the GitHub repository example/repo" },
+            { "role": "assistant", "content": "Ready." },
+            { "role": "user", "content": "دوباره ریپو رو بررسی کن" }
+        ] });
+        assert_eq!(classify_web_intent(&request), WebIntent::Fetch);
+        let request2 = json!({ "messages": [
+            { "role": "user", "content": "Review the GitHub repository example/repo" },
+            { "role": "assistant", "content": "Ready." },
+            { "role": "user", "content": "نظرت چیه؟" }
+        ] });
+        assert_eq!(classify_web_intent(&request2), WebIntent::ReuseContext);
     }
 
     #[test]
