@@ -1777,44 +1777,178 @@ async fn test_local_route(state: TauriState<'_, BridgeState>) -> Result<String, 
     Ok("The local proxy is ready.".into())
 }
 
+// This is an opt-in diagnostic, not a tool-availability or admin-policy
+// bypass. Each check reports its own result. Do not log HTTP content,
+// credentials, proxy address, search text, or response bodies.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebProbeResult {
+    check: &'static str,
+    ok: bool,
+    detail: &'static str,
+    response_ms: u128,
+}
+
+fn web_probe_failure(error: &str) -> &'static str {
+    let text = error.to_ascii_lowercase();
+    if text.contains("403") || text.contains("forbidden") || text.contains("blocked") {
+        "Access denied or blocked"
+    } else if text.contains("429") {
+        "Remote service rate-limited this request"
+    } else if text.contains("timed out") || text.contains("timeout") {
+        "Connection timed out"
+    } else if text.contains("resolve") || text.contains("dns") {
+        "DNS resolution failed (may differ from proxy DNS)"
+    } else if text.contains("proxy") {
+        "Proxy connection failed"
+    } else {
+        "Network, HTTP, or parsing error"
+    }
+}
+
+fn evaluate_web_probe(check: &'static str, payload: &str, response_ms: u128) -> WebProbeResult {
+    let parsed: Value = match serde_json::from_str(payload) {
+        Ok(value) => value,
+        Err(_) => {
+            return WebProbeResult {
+                check,
+                ok: false,
+                detail: "Tool response was not valid JSON",
+                response_ms,
+            };
+        }
+    };
+    if let Some(error) = parsed.get("error").and_then(Value::as_str) {
+        return WebProbeResult {
+            check,
+            ok: false,
+            detail: web_probe_failure(error),
+            response_ms,
+        };
+    }
+    match check {
+        "search" => {
+            let result_count = parsed
+                .get("results")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            WebProbeResult {
+                check,
+                ok: result_count > 0,
+                detail: if result_count > 0 {
+                    "Search returned parseable public results"
+                } else {
+                    "Search returned no parseable results (possibly blocked or changed HTML)"
+                },
+                response_ms,
+            }
+        }
+        "github" => {
+            let readable = parsed
+                .get("content")
+                .and_then(Value::as_str)
+                .is_some_and(|content| content.to_ascii_lowercase().contains("claude-mem"));
+            WebProbeResult {
+                check,
+                ok: readable,
+                detail: if readable {
+                    "Public GitHub repository page was retrieved"
+                } else {
+                    "GitHub response did not contain the expected repository name"
+                },
+                response_ms,
+            }
+        }
+        _ => WebProbeResult {
+            check,
+            ok: false,
+            detail: "Unknown diagnostic type",
+            response_ms,
+        },
+    }
+}
+
 #[tauri::command]
-async fn test_web_access(state: TauriState<'_, BridgeState>) -> Result<String, String> {
+async fn test_web_access(
+    state: TauriState<'_, BridgeState>,
+) -> Result<Vec<WebProbeResult>, String> {
     let config = state.config.read().await.clone();
     if !web_tools_enabled(&config) {
         return Err(
-            "Enable Automatic or Required web access before testing the web bridge.".into(),
+            "Enable Automatic or Required web access before running capability checks.".into(),
         );
     }
-    let client = build_web_client(&config)?;
-    let url = validate_web_url("https://example.com")?;
-    let response = web_get(&client, url).await.map_err(|error| {
-        state.observability.log(
-            "error",
-            "web bridge",
-            "The web bridge connection test failed.",
-        );
-        error
-    })?;
-    let status = response.status();
-    if !status.is_success() {
-        state.observability.log(
-            "warning",
-            "web bridge",
-            &format!("The web bridge test returned HTTP {}.", status.as_u16()),
-        );
-        return Err(format!("The web bridge returned HTTP {}.", status.as_u16()));
-    }
-    let route = if config.web_proxy_mode == "manual" {
-        format!("manual proxy {}", config.web_proxy_url)
-    } else {
-        "direct connection".into()
+    let mut checks = Vec::with_capacity(3);
+
+    // The gateway is local. Never send its authenticated endpoint or token
+    // through the user's web proxy, provider, or a system-wide proxy.
+    let started = Instant::now();
+    let local = Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|_| "Could not initialize local gateway check.")?;
+    let gateway_ok = match local
+        .get(format!("http://127.0.0.1:{}/healthz", config.proxy_port))
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => {
+            response
+                .json::<Value>()
+                .await
+                .ok()
+                .and_then(|value| value.get("ok").and_then(Value::as_bool))
+                == Some(true)
+        }
+        _ => false,
     };
-    state.observability.log(
-        "info",
-        "web bridge",
-        "The web bridge connection test succeeded.",
-    );
-    Ok(format!("Web access is working through {route}."))
+    checks.push(WebProbeResult {
+        check: "gateway",
+        ok: gateway_ok,
+        detail: if gateway_ok {
+            "Local gateway responded to /healthz"
+        } else {
+            "Local gateway was unavailable or returned an invalid health response"
+        },
+        response_ms: started.elapsed().as_millis(),
+    });
+
+    // Use the exact same search/fetch functions, proxy route and public-host
+    // validation that are used for actual Proxy tools. No fabricated success.
+    let started = Instant::now();
+    let search = web_search(&config, &json!({"query":"claude-mem thedotmack GitHub"})).await;
+    checks.push(evaluate_web_probe(
+        "search",
+        &search,
+        started.elapsed().as_millis(),
+    ));
+
+    let started = Instant::now();
+    let github = web_fetch(
+        &config,
+        &json!({"url":"https://github.com/thedotmack/claude-mem","max_chars":15000}),
+    )
+    .await;
+    checks.push(evaluate_web_probe(
+        "github",
+        &github,
+        started.elapsed().as_millis(),
+    ));
+
+    for check in &checks {
+        state.observability.log(
+            if check.ok { "info" } else { "warning" },
+            "web capability",
+            &format!(
+                "{} probe: {} ({} ms).",
+                check.check,
+                if check.ok { "passed" } else { check.detail },
+                check.response_ms
+            ),
+        );
+    }
+    Ok(checks)
 }
 
 async fn healthz(State(state): State<ServerState>) -> impl IntoResponse {
@@ -6595,6 +6729,38 @@ mod tests {
         let error = anthropic_to_openai(&invalid, &fable_route()).unwrap_err();
         assert!(error.contains("COWORK_UNSUPPORTED_MESSAGE_ROLE"));
         assert!(error.contains("message_index=1"));
+    }
+
+    #[test]
+    fn web_capability_probes_must_verify_real_results_not_http_200_alone() {
+        let empty = evaluate_web_probe("search", r#"{"query":"x","results":[]}"#, 8);
+        assert!(!empty.ok);
+        assert!(empty.detail.contains("no parseable results"));
+        let valid = evaluate_web_probe(
+            "search",
+            r#"{"query":"x","results":[{"title":"Example","url":"https://example.com"}]}"#,
+            9,
+        );
+        assert!(valid.ok);
+        let denied = evaluate_web_probe("github", r#"{"error":"The page returned HTTP 403."}"#, 11);
+        assert!(!denied.ok);
+        assert!(denied.detail.contains("denied"));
+        let wrong_page = evaluate_web_probe(
+            "github",
+            r#"{"url":"https://github.com","content":"Sign in to continue"}"#,
+            11,
+        );
+        assert!(!wrong_page.ok);
+        let readable = evaluate_web_probe(
+            "github",
+            r#"{"content":"thedotmack/claude-mem README"}"#,
+            12,
+        );
+        assert!(readable.ok);
+        assert_eq!(
+            web_probe_failure("DNS could not resolve"),
+            "DNS resolution failed (may differ from proxy DNS)"
+        );
     }
 
     #[test]

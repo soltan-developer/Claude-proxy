@@ -76,9 +76,16 @@ export async function testLocalRoute(): Promise<string> {
   return invoke<string>("test_local_route");
 }
 
-export async function testWebAccess(): Promise<string> {
-  if (!isTauriRuntime()) throw new Error("The web bridge check is available in the desktop app.");
-  return invoke<string>("test_web_access");
+export type WebProbeResult = {
+  check: "gateway" | "search" | "github";
+  ok: boolean;
+  detail: string;
+  responseMs: number;
+};
+
+export async function testWebAccess(): Promise<WebProbeResult[]> {
+  if (!isTauriRuntime()) throw new Error("The web capability checks are available in the desktop app.");
+  return invoke<WebProbeResult[]>("test_web_access");
 }
 
 export async function applyClaudeDesktop(): Promise<string> {

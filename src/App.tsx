@@ -23,6 +23,7 @@ import {
   startProxy,
   stopProxy,
   testWebAccess,
+  type WebProbeResult,
 } from "./lib/tauri";
 import { emptyConfig, routeRoles, type BridgeConfig, type ModelRoute, type ProxyStatus } from "./types";
 
@@ -393,7 +394,7 @@ function App() {
           ) : page === "api-pool" ? (
             <ApiPoolPage />
           ) : page === "advanced" ? (
-            <AdvancedPage language={language} draft={draft} setDraft={setDraft} busy={busy} isTauri={isTauriRuntime()} onSave={() => void saveCurrent()} onApplyOutputLimit={() => void saveAndApply("desktop")} onTest={() => void act("web-test", async () => { await persist(draft, draft.setupComplete); return testWebAccess(); }, (result) => translateText(String(result), language))} />
+            <AdvancedPage language={language} draft={draft} setDraft={setDraft} busy={busy} isTauri={isTauriRuntime()} onSave={() => void saveCurrent()} onApplyOutputLimit={() => void saveAndApply("desktop")} onTest={async () => { await persist(draft, draft.setupComplete); return testWebAccess(); }} />
           ) : (
             <DiagnosticsPage isTauri={isTauriRuntime()} language={language} />
           )}
@@ -444,8 +445,23 @@ function AdvancedPage({ language, draft, setDraft, busy, isTauri, onSave, onAppl
   isTauri: boolean;
   onSave: () => void;
   onApplyOutputLimit: () => void;
-  onTest: () => void;
+  onTest: () => Promise<WebProbeResult[]>;
 }) {
+  const [webProbeResults, setWebProbeResults] = useState<WebProbeResult[] | null>(null);
+  const [webProbeBusy, setWebProbeBusy] = useState(false);
+  const [webProbeError, setWebProbeError] = useState("");
+  async function runWebChecks() {
+    setWebProbeBusy(true);
+    setWebProbeResults(null);
+    setWebProbeError("");
+    try {
+      setWebProbeResults(await onTest());
+    } catch (error) {
+      setWebProbeError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWebProbeBusy(false);
+    }
+  }
   const webEnabled = draft.webAccessMode !== "disabled";
   const manualProxy = draft.webProxyMode === "manual";
   const routeSummary = manualProxy
@@ -467,8 +483,16 @@ function AdvancedPage({ language, draft, setDraft, busy, isTauri, onSave, onAppl
           <label className="field span-two"><span>Web search endpoint</span><input dir="ltr" value={draft.webSearchUrl} disabled={!webEnabled} onChange={(event) => setDraft((current) => ({ ...current, webSearchUrl: event.target.value }))} placeholder="https://html.duckduckgo.com/html/" autoCapitalize="off" spellCheck={false} /><small className="field-hint">An HTTPS search endpoint returning DuckDuckGo HTML results. Keep the default unless your network requires another endpoint.</small></label>
           <label className="field span-two"><span>Preferred web domains</span><textarea dir="ltr" value={draft.webPreferredDomains.join("\n")} disabled={!webEnabled} onChange={(event) => setDraft((current) => ({ ...current, webPreferredDomains: event.target.value.split(/[\r\n]+/).map((domain) => domain.trim()).filter(Boolean) }))} placeholder={"github.com\ndocs.example.com"} autoCapitalize="off" spellCheck={false} rows={3} /><small className="field-hint">One hostname per line. These are source preferences for the model, not a network allowlist. A URL you provide is fetched directly without a search first.</small></label>
         </div>
-        <div className="web-status-row" aria-live="polite"><span className={`web-status-dot ${webEnabled ? "web-status-dot-on" : ""}`} aria-hidden="true" /><div><strong>{webEnabled ? (draft.webAccessMode === "required" ? "Web access is required" : "Web access is automatic") : "Web access is disabled"}</strong><small>{routeSummary}</small></div></div>
-        <div className="button-row"><button className="button button-primary" disabled={Boolean(busy)} onClick={onSave}>{busy === "save" ? "Saving…" : "Save advanced settings"}</button><button className="button button-secondary" disabled={!isTauri || !webEnabled || Boolean(busy)} onClick={onTest}>{busy === "web-test" ? "Testing web access…" : "Test web connection"}</button></div>
+        <div className="web-status-row" aria-live="polite"><span className={`web-status-dot ${webProbeResults?.every((item) => item.ok) ? "web-status-dot-on" : ""}`} aria-hidden="true" /><div><strong>{webEnabled ? (language === "fa" ? "قابلیت وب تنظیم شده؛ نتیجهٔ تست واقعی را ببینید" : "Web configured — verify actual reachability below") : "Web access is disabled"}</strong><small>{routeSummary}</small></div></div>
+        <div className="button-row"><button className="button button-primary" disabled={Boolean(busy) || webProbeBusy} onClick={onSave}>{busy === "save" ? "Saving…" : "Save advanced settings"}</button><button className="button button-secondary" disabled={!isTauri || !webEnabled || Boolean(busy) || webProbeBusy} onClick={() => void runWebChecks()}>{webProbeBusy ? (language === "fa" ? "در حال بررسی واقعی…" : "Checking live endpoints…") : (language === "fa" ? "تست واقعی وب و GitHub" : "Test real web and GitHub")}</button></div>
+        {webProbeResults && <div className="web-route-list" role="status" aria-live="polite">
+          {webProbeResults.map((item) => <div key={item.check}>
+            <span className="web-route-number">{item.ok ? "✓" : "×"}</span>
+            <div><strong>{item.check === "gateway" ? (language === "fa" ? "درگاه محلی" : "Local gateway") : item.check === "search" ? (language === "fa" ? "موتور جست‌وجو" : "Web search") : (language === "fa" ? "خواندن صفحهٔ GitHub" : "GitHub page fetch")}: {item.ok ? (language === "fa" ? "موفق" : "Passed") : (language === "fa" ? "ناموفق" : "Failed")}</strong><small>{item.detail} · {item.responseMs} ms</small></div>
+          </div>)}
+        </div>}
+        {webProbeError && <p role="alert" className="preview-note">{webProbeError}</p>}
+        <p className="preview-note">{language === "fa" ? "این تست فقط اتصال محلی و ابزارهای وب خود Proxy را بررسی می‌کند؛ دسترسی ابزارهای داخلی Cowork و سیاست شبکهٔ سازمان مستقل است." : "These tests check Proxy's own gateway and web tools. Cowork/Code native web permissions remain separate."}</p>
         {!isTauri && <p className="preview-note">Live web checks are available in the installed Windows app.</p>}
       </section>
       <aside className="card web-bridge-info">
