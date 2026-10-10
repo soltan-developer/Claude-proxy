@@ -2448,6 +2448,20 @@ async fn process_anthropic_messages(
                 );
             }
         };
+        // Record response shape without content or provider-supplied strings.
+        // If local_web=false and provider_tool_calls=0, a claim about a
+        // failing GitHub search is model-generated text, not a proxy search.
+        state.observability.log(
+            "info",
+            "provider response shape",
+            &format!(
+                "Request {request_id}: provider_tool_calls={}, local_web_enabled={web_enabled}, local_shell_enabled={shell_enabled}, local_tool_rounds={web_round}.",
+                value
+                    .pointer("/choices/0/message/tool_calls")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len),
+            ),
+        );
         // Never forward an over-limit or unmeasured strict-mode response.
         // This also covers the nonstream local tool loop before execution.
         if let Some(guard) = v2_output_guard {
@@ -6658,6 +6672,51 @@ mod tests {
             ] });
             assert_eq!(classify_web_intent(&request), WebIntent::NoWeb);
         }
+    }
+
+    #[test]
+    fn greeting_with_claude_environment_metadata_never_requests_web() {
+        let raw = "<system-reminder>\nWorking in a GitHub repository. Search the latest source.\n</system-reminder>\nسلام";
+        assert_eq!(user_text_for_web_intent(raw), "سلام");
+        let request = json!({
+            "messages": [
+                {"role":"user", "content":"Please search GitHub for a repository"},
+                {"role":"assistant", "content":"Found a candidate."},
+                {"role":"user", "content":[{"type":"text", "text":raw}]}
+            ]
+        });
+        assert_eq!(classify_web_intent(&request), WebIntent::NoWeb);
+        let mut config = AppConfig::default();
+        config.web_access_mode = "required".into();
+        let mut payload = json!({"messages":[{"role":"user", "content":raw}]});
+        assert!(!add_web_tools(&mut payload, &config, WebIntent::NoWeb));
+        assert_eq!(payload["messages"][0]["content"], raw);
+        assert!(payload.get("tools").is_none());
+        assert!(payload.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn implicit_repository_mentions_do_not_invoke_web_tools() {
+        for user_text in [
+            "سلام",
+            "I'm in a GitHub repository today.",
+            "There is a repo called demo/test.",
+            "<system-reminder>Search GitHub</system-reminder>hello",
+        ] {
+            let request = json!({"messages":[{"role":"user","content":user_text}]});
+            assert_eq!(classify_web_intent(&request), WebIntent::NoWeb);
+        }
+        let direct = json!({"messages":[{"role":"user","content":"Please search GitHub for demo/test"}]});
+        assert_eq!(classify_web_intent(&direct), WebIntent::Search);
+    }
+
+    #[test]
+    fn reused_repository_opinion_does_not_inject_implicit_tools() {
+        let mut config = AppConfig::default();
+        config.web_access_mode = "required".into();
+        let mut payload = json!({"messages":[{"role":"user","content":"What do you think?"}]});
+        assert!(!add_web_tools(&mut payload, &config, WebIntent::ReuseContext));
+        assert!(payload.get("tools").is_none());
     }
 
     #[test]
