@@ -1057,7 +1057,14 @@ async fn get_proxy_status(state: TauriState<'_, BridgeState>) -> Result<ProxySta
 #[tauri::command]
 async fn fetch_models(state: TauriState<'_, BridgeState>) -> Result<Vec<String>, String> {
     let requested_config = state.config.read().await.clone();
-    let models = match fetch_upstream_models(&state.client, &requested_config).await {
+    let models = match fetch_upstream_models(
+        &state.client,
+        &state.direct_provider_client,
+        &requested_config,
+        &state.observability,
+    )
+    .await
+    {
         Ok(models) => models,
         Err(error) => {
             state.observability.log("error", "model discovery", "Model discovery failed. Review the provider URL, authentication, and model discovery endpoint.");
@@ -1090,7 +1097,13 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
     let mut request = state.client.get(url).timeout(Duration::from_secs(15));
     request = add_upstream_auth(request, &config)?;
     let started = std::time::Instant::now();
-    let response = request.send().await.map_err(|error| {
+    let response = send_provider_with_fallback(
+        request,
+        &state.direct_provider_client,
+        &state.observability,
+    )
+    .await
+    .map_err(|error| {
         state.observability.log(
             "error",
             "provider ping",
@@ -1122,12 +1135,16 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
     ))
 }
 
-async fn fetch_upstream_models(client: &Client, config: &AppConfig) -> Result<Vec<String>, String> {
+async fn fetch_upstream_models(
+    client: &Client,
+    direct: &Client,
+    config: &AppConfig,
+    observability: &ObservabilityStore,
+) -> Result<Vec<String>, String> {
     let url = upstream_url(&config.base_url, "models")?;
     let mut request = client.get(url).timeout(Duration::from_secs(30));
     request = add_upstream_auth(request, config)?;
-    let response = request
-        .send()
+    let response = send_provider_with_fallback(request, direct, observability)
         .await
         .map_err(|error| format!("Could not connect to the model provider: {error}"))?;
     let status = response.status();
@@ -1971,7 +1988,13 @@ async fn process_anthropic_messages(
                     return api_error(StatusCode::BAD_GATEWAY, "authentication_error", &error)
                 }
             };
-            let response = match outgoing.json(&payload).send().await {
+            let response = match send_provider_with_fallback(
+                outgoing.json(&payload),
+                &state.direct_provider_client,
+                &state.observability,
+            )
+            .await
+            {
                 Ok(response) => response,
                 Err(error) => {
                     let failure_kind = provider_transport_error_kind(&error);
