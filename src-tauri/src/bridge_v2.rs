@@ -51,6 +51,7 @@ const WEB_CONCURRENCY: usize = 4;
 const DEFAULT_WEB_SEARCH_URL: &str = "https://html.duckduckgo.com/html/";
 const WEB_TOOL_MAX_ROUNDS: usize = 4;
 const WEB_FETCH_MAX_CHARS: usize = 20_000;
+const WEB_RESPONSE_MAX_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_SHELL_ACCESS_MODE: &str = "disabled";
 const SHELL_OUTPUT_MAX_CHARS: usize = 20_000;
 const SHELL_COMMAND_MAX_CHARS: usize = 4_000;
@@ -2001,7 +2002,12 @@ fn mcp_tool_list() -> Vec<Value> {
             json!({
                 "name":tool["name"],
                 "description":tool["description"],
-                "inputSchema":tool["parameters"]
+                "inputSchema":tool["parameters"],
+                "annotations": {
+                    "readOnlyHint": true,
+                    "destructiveHint": false,
+                    "openWorldHint": true
+                }
             })
         })
         .collect()
@@ -4069,6 +4075,21 @@ fn extract_search_results(html: &str, base_url: &Url) -> Vec<Value> {
     results
 }
 
+async fn read_bounded_web_text(mut response: reqwest::Response) -> Result<String, String> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "The public web response could not be read.".to_string())?
+    {
+        if body.len().saturating_add(chunk.len()) > WEB_RESPONSE_MAX_BYTES {
+            return Err("The public web response exceeded the 2 MiB safety limit.".into());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
 async fn web_search(config: &AppConfig, arguments: &Value) -> String {
     let query = arguments
         .get("query")
@@ -4126,17 +4147,23 @@ async fn web_search(config: &AppConfig, arguments: &Value) -> String {
         Err(error) => return json!({ "error": error }).to_string(),
     };
     let status = response.status();
-    let body = match response.text().await {
+    let body = match read_bounded_web_text(response).await {
         Ok(body) => body,
-        Err(error) => {
-            return json!({ "error": format!("The search response could not be read: {error}") })
-                .to_string()
-        }
+        Err(error) => return json!({ "error": error }).to_string(),
     };
     if !status.is_success() {
         return json!({ "error": format!("The search service returned HTTP {}.", status.as_u16()) }).to_string();
     }
-    json!({ "query": query, "results": extract_search_results(&body, &endpoint) }).to_string()
+    let results = extract_search_results(&body, &endpoint);
+    if results.is_empty() {
+        return json!({ "error": "Search returned no verifiable results. Do not guess or fabricate sources.", "query": query }).to_string();
+    }
+    let retrieved_at_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    json!({ "query": query, "results": results, "retrieved_at_unix": retrieved_at_unix })
+        .to_string()
 }
 
 async fn web_fetch(config: &AppConfig, arguments: &Value) -> String {
@@ -4169,11 +4196,10 @@ async fn web_fetch(config: &AppConfig, arguments: &Value) -> String {
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let body = match response.text().await {
+    let source_url = response.url().to_string();
+    let body = match read_bounded_web_text(response).await {
         Ok(body) => body,
-        Err(error) => {
-            return json!({ "error": format!("The page could not be read: {error}") }).to_string()
-        }
+        Err(error) => return json!({ "error": error, "url": url }).to_string(),
     };
     if !status.is_success() {
         return json!({ "error": format!("The page returned HTTP {}.", status.as_u16()), "url": url }).to_string();
@@ -4183,7 +4209,11 @@ async fn web_fetch(config: &AppConfig, arguments: &Value) -> String {
     } else {
         truncate(&decode_html_entities(&body), max_chars)
     };
-    json!({ "url": url, "content_type": content_type, "content": truncate(&content, max_chars) })
+    let retrieved_at_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    json!({ "url": url, "source_url": source_url, "retrieved_at_unix": retrieved_at_unix, "content_type": content_type, "content": truncate(&content, max_chars) })
         .to_string()
 }
 
@@ -7054,6 +7084,9 @@ mod tests {
         let tools = mcp_tool_list();
         assert_eq!(tools.len(), 2);
         assert!(tools.iter().all(|value| value.get("inputSchema").is_some()));
+        assert!(tools
+            .iter()
+            .all(|value| { value.pointer("/annotations/readOnlyHint") == Some(&json!(true)) }));
     }
 
     #[test]

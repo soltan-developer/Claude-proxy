@@ -15,6 +15,7 @@ on:
       - v2/2.0.11-cowork-native-message-roles
       - v2/2.0.12-real-web-capability-diagnostics
       - v2/2.0.13-local-mcp-web-tools
+      - v2/2.0.14-cowork-mcpb-grounded-web
       - v2/2.0.9-tool-fidelity-regressions
   workflow_dispatch:
 
@@ -71,6 +72,9 @@ jobs:
           [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path "scripts/build-portable.ps1").Path, [ref]$null, [ref]$parseErrors) | Out-Null
           if ($parseErrors.Count -ne 0) { throw "Portable build script has PowerShell syntax errors." }
 
+      - name: Test local Cowork MCPB shim
+        run: node --test cowork-mcpb/server/index.test.cjs
+
       - name: Build portable executable
         shell: pwsh
         run: pnpm build:portable
@@ -80,5 +84,25 @@ jobs:
         with:
           name: Claude-Proxy-v${{ env.APP_VERSION }}-Portable
           path: portable/Claude-Proxy-v${{ env.APP_VERSION }}-Portable.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Package optional local Cowork MCPB (no token bundled)
+        shell: pwsh
+        run: |
+          $staging = Join-Path $env:RUNNER_TEMP "claude-proxy-cowork-web"
+          New-Item -ItemType Directory -Path (Join-Path $staging "server") -Force | Out-Null
+          Copy-Item "cowork-mcpb/manifest.json" (Join-Path $staging "manifest.json")
+          Copy-Item "cowork-mcpb/server/index.cjs" (Join-Path $staging "server/index.cjs")
+          New-Item -ItemType Directory -Path "portable" -Force | Out-Null
+          $zipPath = "portable/Claude-Proxy-v$env:APP_VERSION-Cowork-Web.zip"
+          Compress-Archive -Path (Join-Path $staging "*") -DestinationPath $zipPath -Force
+          Rename-Item -Path $zipPath -NewName "Claude-Proxy-v$env:APP_VERSION-Cowork-Web.mcpb"
+
+      - name: Upload optional Cowork MCPB (private test artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Claude-Proxy-v${{ env.APP_VERSION }}-Cowork-Web
+          path: portable/Claude-Proxy-v${{ env.APP_VERSION }}-Cowork-Web.mcpb
           if-no-files-found: error
           retention-days: 14

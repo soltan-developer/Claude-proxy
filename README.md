@@ -1,4 +1,4 @@
-# Claude Proxy 2.0.13
+# Claude Proxy 2.0.14
 
 Claude Proxy is a Windows desktop app that connects Claude Desktop and Claude CLI directly to OpenAI-compatible model providers. Provider credentials, URLs, and model routes start empty on a fresh install.
 
@@ -46,3 +46,7 @@ Open **Diagnostics** to review recent proxy, provider, configuration, and usage-
 Claude Proxy is distributed under the custom **Salmanzadeh Non-Commercial License 1.0** (`LicenseRef-Salmanzadeh-NonCommercial-1.0`). Personal, academic, educational, research, and other non-commercial use is free. Commercial use requires prior written permission from the developer. See [`LICENSE.txt`](LICENSE.txt) for the full terms. This is a source-available, non-commercial license, not an OSI-approved open-source license. Third-party components retain their own licenses.
 
 Developer: Salmanzadeh — [Eitaa channel](https://eitaa.com/salmanzadeh_ir)
+
+## Optional Cowork local MCP bundle (v2.0.14)
+
+A separate, **manual-install** MCPB extension can expose the existing read-only web_search/web_fetch tools to **compatible authorized local Cowork sessions**. It is not installed or enabled by Claude Proxy and does not alter any Claude network policy. Cloud Cowork sessions cannot run a local MCP server; native Cowork Web Search/Fetch remains independent of Claude Code and Proxy. Domain restrictions and organization policies must be honored. For setup, security notes, and honest failure conditions see [the Cowork MCPB guide](cowork-mcpb/README.md). The private Windows CI build produces a distinct `Claude-Proxy-v2.0.14-Cowork-Web.mcpb` artifact; a successful offline build is **not** proof of live Cowork integration.
