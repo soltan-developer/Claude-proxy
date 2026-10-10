@@ -6,6 +6,7 @@ on:
       - main
       - v2/automatic-provider-network-recovery
       - v2/2.0.9-direct-provider-fidelity
+      - v2/2.0.9-tool-fidelity-regressions
   workflow_dispatch:
 
 concurrency:

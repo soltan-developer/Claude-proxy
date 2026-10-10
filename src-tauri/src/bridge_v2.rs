@@ -1170,6 +1170,38 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
     ))
 }
 
+// This is a conservative, script-based smoke check, not a linguistic
+// correctness assessment. A bare marker or an English-only reply is not a pass.
+fn isolated_probe_checks(
+    content: &str,
+    marker: &str,
+    language: &str,
+    tool_count: usize,
+) -> (bool, bool, bool) {
+    let marker_at_end = content.trim_end().ends_with(marker);
+    let script_characters = content
+        .chars()
+        .filter(|&character| match language {
+            "Persian" => matches!(
+                character,
+                '\u{0600}'..='\u{06FF}' | '\u{0750}'..='\u{077F}' | '\u{08A0}'..='\u{08FF}'
+            ),
+            "Chinese" => matches!(
+                character,
+                '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}'
+            ),
+            _ => false,
+        })
+        .take(2)
+        .count();
+    let script_detected = script_characters >= 2;
+    (
+        marker_at_end && script_detected && tool_count == 0,
+        marker_at_end,
+        script_detected,
+    )
+}
+
 fn isolated_provider_probe_payload(model: &str, prompt: &str) -> Value {
     json!({
         "model": model,
@@ -1241,13 +1273,14 @@ async fn probe_provider_fidelity(state: TauriState<'_, BridgeState>) -> Result<V
             .pointer("/choices/0/message/tool_calls")
             .and_then(Value::as_array)
             .map_or(0, Vec::len);
-        let success = content.contains(marker) && tool_count == 0;
+        let (success, marker_at_end, script_detected) =
+            isolated_probe_checks(content, marker, language, tool_count);
         let reply_preview: String = content.chars().take(240).collect();
         state.observability.log(
             if success { "info" } else { "warning" },
             "provider fidelity",
             &format!(
-                "Isolated {language} model probe: marker_matched={success}, tool_calls={tool_count}, response_ms={}.",
+                "Isolated {language} model probe: passed={success}, marker_at_end={marker_at_end}, script_detected={script_detected}, tool_calls={tool_count}, response_ms={}.",
                 started.elapsed().as_millis()
             ),
         );
@@ -1255,7 +1288,11 @@ async fn probe_provider_fidelity(state: TauriState<'_, BridgeState>) -> Result<V
             "language": language,
             "marker": marker,
             "passed": success,
-            "model": route.upstream_model,
+            "markerAtEnd": marker_at_end,
+            "scriptDetected": script_detected,
+            "model": payload.get("model").and_then(Value::as_str).unwrap_or("unreported"),
+            "requestedModel": route.upstream_model,
+            "responseId": payload.get("id").and_then(Value::as_str).unwrap_or("unreported"),
             "responseMs": started.elapsed().as_millis(),
             "toolCalls": tool_count,
             "reply": reply_preview
@@ -2432,13 +2469,26 @@ async fn process_anthropic_messages(
             }
         }
 
-        if web_enabled {
+        if local_tools_enabled {
             if let Some(calls) = local_tool_calls(&value) {
+                // A provider may hallucinate a local tool that was never
+                // offered for this request. Validate the ENTIRE batch before
+                // executing any tool: Web permission is never Shell permission.
+                if calls
+                    .iter()
+                    .any(|(_, name, _)| !local_tool_allowed(name, web_enabled, shell_enabled))
+                {
+                    return api_error(
+                        StatusCode::BAD_GATEWAY,
+                        "api_error",
+                        "The provider requested a local tool that is disabled for this request.",
+                    );
+                }
                 if web_round >= WEB_TOOL_MAX_ROUNDS {
                     return api_error(
                         StatusCode::BAD_GATEWAY,
                         "api_error",
-                        "The web tool loop exceeded its safety limit. Start a new request and try a narrower question.",
+                        "The local tool loop exceeded its safety limit. Start a new request and try a narrower question.",
                     );
                 }
                 web_round += 1;
@@ -2454,27 +2504,32 @@ async fn process_anthropic_messages(
                     messages.push(assistant);
                 }
                 for (id, name, arguments) in calls {
-                    let web_permit = match state.web_slots.clone().acquire_owned().await {
+                    let slots = if name == "claude_proxy_shell" {
+                        &state.shell_slots
+                    } else {
+                        &state.web_slots
+                    };
+                    let local_permit = match slots.clone().acquire_owned().await {
                         Ok(permit) => permit,
                         Err(_) => {
                             return api_error(
                                 StatusCode::SERVICE_UNAVAILABLE,
                                 "api_error",
-                                "The proxy is shutting down and cannot run another web tool.",
+                                "The proxy is shutting down and cannot run another local tool.",
                             )
                         }
                     };
-                    let web_started = Instant::now();
+                    let local_started = Instant::now();
                     let result =
                         execute_local_tool(&config, &state.observability, &name, &arguments).await;
-                    drop(web_permit);
+                    drop(local_permit);
                     web_tool_count += 1;
-                    let web_elapsed_ms = web_started.elapsed().as_millis();
+                    let local_elapsed_ms = local_started.elapsed().as_millis();
                     state.observability.log(
                         "info",
                         "web bridge",
                         &format!(
-                            "Request {request_id} ran local {name} tool in {web_elapsed_ms} ms."
+                            "Request {request_id} ran local {name} tool in {local_elapsed_ms} ms."
                         ),
                     );
                     if let Some(messages) =
@@ -2731,10 +2786,14 @@ fn anthropic_to_openai(request: &Value, route: &ModelRoute) -> Result<Value, Str
                 }
                 _ => {
                     let (body, results) = user_content(content);
+                    // A completed assistant tool_call must be followed by its
+                    // tool response before any new user instruction. Anthropic
+                    // permits a tool_result and text in one user content array,
+                    // but Chat Completions requires the tool reply first.
+                    messages.extend(results);
                     if body != Value::Null {
                         messages.push(json!({ "role": "user", "content": body }));
                     }
-                    messages.extend(results);
                 }
             }
         }
@@ -3771,6 +3830,14 @@ fn normalize_web_assistant_message(message: &mut Value) {
         if let Some(name_value) = call.pointer_mut("/function/name") {
             *name_value = Value::String(canonical.into());
         }
+    }
+}
+
+fn local_tool_allowed(name: &str, web_enabled: bool, shell_enabled: bool) -> bool {
+    match name {
+        "claude_proxy_web_search" | "claude_proxy_web_fetch" => web_enabled,
+        "claude_proxy_shell" => shell_enabled,
+        _ => false,
     }
 }
 
@@ -6073,6 +6140,64 @@ mod tests {
     }
 
     #[test]
+    fn mixed_tool_result_and_user_text_keep_valid_chat_completion_order() {
+        let request = json!({
+            "model": "claude-fable-5-1",
+            "max_tokens": 512,
+            "messages": [
+                { "role": "assistant", "content": [
+                    { "type": "tool_use", "id": "call-read", "name": "Read", "input": { "file_path": "README.md" } }
+                ] },
+                { "role": "user", "content": [
+                    { "type": "text", "text": "Summarize only the file you just read." },
+                    { "type": "tool_result", "tool_use_id": "call-read", "content": "README fixture result" }
+                ] }
+            ]
+        });
+        let converted = anthropic_to_openai(&request, &fable_route()).unwrap();
+        let messages = converted["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call-read");
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "call-read");
+        assert_eq!(messages[1]["content"], "README fixture result");
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(
+            messages[2]["content"],
+            "Summarize only the file you just read."
+        );
+    }
+
+    #[test]
+    fn isolated_probe_rejects_marker_only_wrong_language_or_wrong_position() {
+        assert_eq!(
+            isolated_probe_checks("FA-527", "FA-527", "Persian", 0),
+            (false, true, false)
+        );
+        assert_eq!(
+            isolated_probe_checks("Hello FA-527", "FA-527", "Persian", 0),
+            (false, true, false)
+        );
+        assert_eq!(
+            isolated_probe_checks("سلام FA-527 extra", "FA-527", "Persian", 0),
+            (false, false, true)
+        );
+        assert_eq!(
+            isolated_probe_checks("سلام FA-527", "FA-527", "Persian", 0),
+            (true, true, true)
+        );
+        assert_eq!(
+            isolated_probe_checks("你好 ZH-884", "ZH-884", "Chinese", 0),
+            (true, true, true)
+        );
+        assert_eq!(
+            isolated_probe_checks("你好 ZH-884", "ZH-884", "Chinese", 1),
+            (false, true, true)
+        );
+    }
+
+    #[test]
     fn context_recovery_drops_only_an_old_complete_turn() {
         let mut payload = json!({ "messages": [
             { "role": "system", "content": "keep system prompt" },
@@ -6337,6 +6462,16 @@ mod tests {
         assert_eq!(payload["tools"].as_array().unwrap().len(), 1);
         assert_eq!(payload["tools"][0]["function"]["name"], "Read");
         assert!(payload.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn web_access_never_authorizes_host_shell_and_shell_only_mode_works() {
+        assert!(local_tool_allowed("claude_proxy_web_fetch", true, false));
+        assert!(!local_tool_allowed("claude_proxy_shell", true, false));
+        assert!(!local_tool_allowed("claude_proxy_web_search", false, true));
+        assert!(local_tool_allowed("claude_proxy_shell", false, true));
+        assert!(!local_tool_allowed("terminal", true, true));
+        assert!(!local_tool_allowed("Read", true, true));
     }
 
     #[test]

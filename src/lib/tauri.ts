@@ -102,7 +102,11 @@ export type ProviderProbeResult = {
   language: string;
   marker: string;
   passed: boolean;
+  markerAtEnd: boolean;
+  scriptDetected: boolean;
   model: string;
+  requestedModel: string;
+  responseId: string;
   responseMs: number;
   toolCalls: number;
   reply: string;
