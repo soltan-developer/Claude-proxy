@@ -1163,6 +1163,84 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
     ))
 }
 
+// An opt-in, minimal provider-only probe. Each question is independent:
+// no Claude Desktop history, tools, web search, system prompts or host actions.
+// Only fixed synthetic markers go to the selected default upstream model.
+#[tauri::command]
+async fn probe_provider_fidelity(
+    state: TauriState<'_, BridgeState>,
+) -> Result<Vec<Value>, String> {
+    let config = state.config.read().await.clone();
+    let route = config
+        .routes
+        .iter()
+        .find(|route| route.is_default)
+        .or_else(|| config.routes.first())
+        .ok_or_else(|| "Map at least one upstream model before running the probe.".to_string())?;
+    let endpoint = upstream_url(&config.base_url, "chat/completions")?;
+    let mut results = Vec::new();
+    for (language, marker, prompt) in [
+        ("Persian", "FA-527", "فقط به فارسی پاسخ بده و در پایان FA-527 بنویس. هیچ جست‌وجویی انجام نده."),
+        ("Chinese", "ZH-884", "请只用中文回答，并在结尾写上 ZH-884。不要搜索。"),
+    ] {
+        let request = state
+            .direct_provider_client
+            .post(&endpoint)
+            .timeout(Duration::from_secs(45))
+            .json(&json!({
+                "model": route.upstream_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 128,
+                "stream": false
+            }));
+        let request = add_upstream_auth(request, &config)?;
+        let started = Instant::now();
+        let response = request
+            .send()
+            .await
+            .map_err(|err| format!("Direct isolated model probe could not connect: {err}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!(
+                "Direct isolated model probe returned HTTP {}. Check the model route and provider API.",
+                status.as_u16()
+            ));
+        }
+        let payload: Value = response
+            .json()
+            .await
+            .map_err(|_| "The provider probe response is not valid JSON.".to_string())?;
+        let content = payload
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let tool_count = payload
+            .pointer("/choices/0/message/tool_calls")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let success = content.contains(marker) && tool_count == 0;
+        let reply_preview: String = content.chars().take(240).collect();
+        state.observability.log(
+            if success { "info" } else { "warning" },
+            "provider fidelity",
+            &format!(
+                "Isolated direct {language} model probe: marker_matched={success}, tool_calls={tool_count}, response_ms={}.",
+                started.elapsed().as_millis()
+            ),
+        );
+        results.push(json!({
+            "language": language,
+            "marker": marker,
+            "passed": success,
+            "model": route.upstream_model,
+            "responseMs": started.elapsed().as_millis(),
+            "toolCalls": tool_count,
+            "reply": reply_preview
+        }));
+    }
+    Ok(results)
+}
+
 async fn fetch_upstream_models(
     client: &Client,
     direct: &Client,
@@ -5737,6 +5815,7 @@ pub fn run() {
             get_proxy_status,
             fetch_models,
             ping_provider,
+            probe_provider_fidelity,
             start_proxy,
             stop_proxy,
             test_local_route,
