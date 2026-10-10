@@ -2132,8 +2132,7 @@ async fn process_anthropic_messages(
     // They never guess from model names or silently degrade Code into chat.
     let client_tools_owned = client_tools_take_precedence(&request);
     let may_trim_context = may_auto_trim_context(&config, client_tools_owned);
-    if client_tools_owned
-        && agent_output_budget_collapsed(&request, &payload, route.context_window)
+    if client_tools_owned && agent_output_budget_collapsed(&request, &payload, route.context_window)
     {
         state.observability.log(
             "warning",
