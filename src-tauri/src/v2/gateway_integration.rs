@@ -957,7 +957,7 @@ async fn provider_attempts_disabled_shell(Json(payload): Json<Value>) -> Json<Va
             "tool_calls": [{
                 "id": "attempted-shell",
                 "type": "function",
-                "function": {"name": "terminal", "arguments": "{\\"command\\":\\"echo must-not-run\\"}"}
+                "function": {"name": "terminal", "arguments": json!({"command": "echo must-not-run"}).to_string()}
             }]
         }}],
         "usage": {"prompt_tokens": 50, "completion_tokens": 12}
