@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'src-tauri/src/v2/**'
+      - 'cowork-mcpb/**'
       - 'src-tauri/src/lib.rs'
       - 'src-tauri/src/bridge_v2.rs'
       - 'src-tauri/src/observability.rs'
@@ -77,5 +78,7 @@ jobs:
         # The repository currently has no package-lock.json; add one before
         # switching this job to a fully reproducible npm ci install.
         run: npm install --no-package-lock --no-audit --no-fund
+      - name: Test local Cowork MCPB shim
+        run: node --test cowork-mcpb/server/index.test.cjs
       - name: Typecheck and build frontend
         run: npm run build
