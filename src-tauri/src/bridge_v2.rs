@@ -6711,7 +6711,8 @@ mod tests {
             let request = json!({"messages":[{"role":"user","content":user_text}]});
             assert_eq!(classify_web_intent(&request), WebIntent::NoWeb);
         }
-        let direct = json!({"messages":[{"role":"user","content":"Please search GitHub for demo/test"}]});
+        let direct =
+            json!({"messages":[{"role":"user","content":"Please search GitHub for demo/test"}]});
         assert_eq!(classify_web_intent(&direct), WebIntent::Search);
     }
 
@@ -6720,7 +6721,11 @@ mod tests {
         let mut config = AppConfig::default();
         config.web_access_mode = "required".into();
         let mut payload = json!({"messages":[{"role":"user","content":"What do you think?"}]});
-        assert!(!add_web_tools(&mut payload, &config, WebIntent::ReuseContext));
+        assert!(!add_web_tools(
+            &mut payload,
+            &config,
+            WebIntent::ReuseContext
+        ));
         assert!(payload.get("tools").is_none());
     }
 
