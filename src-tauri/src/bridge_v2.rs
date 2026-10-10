@@ -720,11 +720,16 @@ fn classify_web_intent(request: &Value) -> WebIntent {
     // Mentioning a repository in environment metadata or conversational
     // context is not an instruction to search it. Require a current action,
     // a public URL, or a fresh-information question.
-    if !(current_fresh_intent
-        || asks_for_new_search(&latest_user_text)
-        || asks_to_revisit_repository(&latest_user_text)
-        || explicit_repo_followup)
-    {
+    let has_repository_action = (github_was_in_chat || current_repo_intent)
+        && (asks_to_revisit_repository(&latest_user_text)
+            || asks_for_new_search(&latest_user_text));
+    let asks_fresh_question = current_fresh_intent
+        && (latest_user_text.contains('?')
+            || latest_user_text.contains('؟')
+            || asks_for_new_search(&latest_user_text)
+            || latest_user_text.to_ascii_lowercase().contains("tell me")
+            || latest_user_text.contains("بگو"));
+    if !(asks_fresh_question || has_repository_action || explicit_repo_followup) {
         return WebIntent::NoWeb;
     }
     if github_was_in_chat && asks_to_revisit_repository(&latest_user_text) {
