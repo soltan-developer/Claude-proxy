@@ -1097,20 +1097,17 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
     let mut request = state.client.get(url).timeout(Duration::from_secs(15));
     request = add_upstream_auth(request, &config)?;
     let started = std::time::Instant::now();
-    let response = send_provider_with_fallback(
-        request,
-        &state.direct_provider_client,
-        &state.observability,
-    )
-    .await
-    .map_err(|error| {
-        state.observability.log(
-            "error",
-            "provider ping",
-            "Provider API ping failed before receiving an HTTP response.",
-        );
-        format!("Could not reach the provider API: {error}")
-    })?;
+    let response =
+        send_provider_with_fallback(request, &state.direct_provider_client, &state.observability)
+            .await
+            .map_err(|error| {
+                state.observability.log(
+                    "error",
+                    "provider ping",
+                    "Provider API ping failed before receiving an HTTP response.",
+                );
+                format!("Could not reach the provider API: {error}")
+            })?;
     let status = response.status();
     let elapsed = started.elapsed().as_millis();
     if !status.is_success() {
@@ -5587,7 +5584,9 @@ async fn send_provider_with_mode(
                 "provider network",
                 "System proxy connection failed. Trying a direct provider connection once. This bypasses the configured system proxy; set CLAUDE_PROXY_PROVIDER_PROXY_MODE=system to disable direct fallback.",
             );
-            direct.execute(fallback.expect("checked above").build()?).await
+            direct
+                .execute(fallback.expect("checked above").build()?)
+                .await
         }
         Err(error) => Err(error),
     }
