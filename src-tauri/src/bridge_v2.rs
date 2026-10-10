@@ -4162,7 +4162,8 @@ async fn web_search(config: &AppConfig, arguments: &Value) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    json!({ "query": query, "results": results, "retrieved_at_unix": retrieved_at_unix }).to_string()
+    json!({ "query": query, "results": results, "retrieved_at_unix": retrieved_at_unix })
+        .to_string()
 }
 
 async fn web_fetch(config: &AppConfig, arguments: &Value) -> String {
@@ -7083,9 +7084,9 @@ mod tests {
         let tools = mcp_tool_list();
         assert_eq!(tools.len(), 2);
         assert!(tools.iter().all(|value| value.get("inputSchema").is_some()));
-        assert!(tools.iter().all(|value| {
-            value.pointer("/annotations/readOnlyHint") == Some(&json!(true))
-        }));
+        assert!(tools
+            .iter()
+            .all(|value| { value.pointer("/annotations/readOnlyHint") == Some(&json!(true)) }));
     }
 
     #[test]
