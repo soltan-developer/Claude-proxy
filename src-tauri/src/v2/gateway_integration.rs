@@ -774,7 +774,6 @@ async fn v2_concurrent_fresh_sessions_do_not_mix_user_messages() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-
 async fn latest_turn_intent_mock(Json(payload): Json<Value>) -> Json<Value> {
     let messages = payload["messages"].as_array().expect("messages");
     assert_eq!(messages.len(), 3);
@@ -813,7 +812,9 @@ async fn real_http_old_github_history_cannot_force_tools_into_language_only_turn
         axum::serve(
             provider,
             Router::new().route("/v1/chat/completions", post(latest_turn_intent_mock)),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
     });
     let (state, dir) = test_server_state(provider_port, ContractMode::Enforce);
     state.config.write().await.web_access_mode = "required".into();
@@ -822,13 +823,21 @@ async fn real_http_old_github_history_cannot_force_tools_into_language_only_turn
     let gateway_task = tokio::spawn(async move {
         axum::serve(
             gateway,
-            Router::new().route("/v1/messages", post(anthropic_messages)).with_state(state),
-        ).await.unwrap();
+            Router::new()
+                .route("/v1/messages", post(anthropic_messages))
+                .with_state(state),
+        )
+        .await
+        .unwrap();
     });
     let url = format!("http://127.0.0.1:{port}/v1/messages");
     let client = reqwest::Client::new();
     for (text, marker, explicit_client_tool) in [
-        ("فقط به فارسی پاسخ بده و عبارت FA-527 را در پایان بنویس.", "FA-527", false),
+        (
+            "فقط به فارسی پاسخ بده و عبارت FA-527 را در پایان بنویس.",
+            "FA-527",
+            false,
+        ),
         ("请只用中文回答，并在结尾写 ZH-884", "ZH-884", true),
     ] {
         let mut body = json!({
@@ -844,10 +853,13 @@ async fn real_http_old_github_history_cannot_force_tools_into_language_only_turn
                 "name":"Read", "input_schema":{"type":"object"}
             }]);
         }
-        let response = client.post(&url)
+        let response = client
+            .post(&url)
             .bearer_auth("test-gateway-token")
             .json(&body)
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let value: Value = response.json().await.unwrap();
         assert_eq!(value["content"][0]["text"], marker);
@@ -857,9 +869,10 @@ async fn real_http_old_github_history_cannot_force_tools_into_language_only_turn
     let _ = std::fs::remove_dir_all(dir);
 }
 
-
 async fn client_tool_priority_mock(Json(payload): Json<Value>) -> Json<Value> {
-    let tools = payload["tools"].as_array().expect("client tool definitions");
+    let tools = payload["tools"]
+        .as_array()
+        .expect("client tool definitions");
     assert_eq!(tools.len(), 1, "no local bridge tools may be injected");
     assert_eq!(tools[0]["function"]["name"], "Read");
     assert!(payload.get("tool_choice").is_none(), "no forced web search");
@@ -884,7 +897,9 @@ async fn real_http_client_read_is_not_hijacked_by_required_web_or_host_shell() {
         axum::serve(
             provider,
             Router::new().route("/v1/chat/completions", post(client_tool_priority_mock)),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
     });
     let (state, dir) = test_server_state(provider_port, ContractMode::Enforce);
     {
@@ -897,8 +912,12 @@ async fn real_http_client_read_is_not_hijacked_by_required_web_or_host_shell() {
     let server = tokio::spawn(async move {
         axum::serve(
             gateway,
-            Router::new().route("/v1/messages", post(anthropic_messages)).with_state(state),
-        ).await.unwrap();
+            Router::new()
+                .route("/v1/messages", post(anthropic_messages))
+                .with_state(state),
+        )
+        .await
+        .unwrap();
     });
     let reply = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{port}/v1/messages"))
@@ -908,7 +927,9 @@ async fn real_http_client_read_is_not_hijacked_by_required_web_or_host_shell() {
             "messages":[{"role":"user","content":"Read my local GitHub repo README"}],
             "tools":[{"name":"Read", "input_schema":{"type":"object"}}]
         }))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(reply.status(), reqwest::StatusCode::OK);
     let result: Value = reply.json().await.unwrap();
     assert_eq!(result["stop_reason"], "tool_use");
