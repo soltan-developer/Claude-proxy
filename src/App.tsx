@@ -281,6 +281,7 @@ function App() {
       displayName: `${role.title} · ${model}`,
       upstreamModel: model,
       tier: role.tier,
+      thinkingMode: model === "qwen38" || model === "qwen38-sglang" ? "disabled" : "inherit",
       contextWindow: suggestedContext,
       maxOutputTokens: 0,
       isDefault: draft.routes.length === 0,
@@ -660,7 +661,11 @@ function ModelsPage({ draft, setDraft, newRole, setNewRole, newModel, setNewMode
   const availableRoles = routeRoles.filter((role) => !draft.routes.some((route) => route.routeId === role.id));
   function modelChanged(index: number, model: string) {
     const context = model === "qwen38" ? 128_000 : model === "qwen38-sglang" ? 200_000 : draft.routes[index].contextWindow;
-    updateRoute(index, { upstreamModel: model, ...(context ? { contextWindow: context } : {}) });
+    updateRoute(index, {
+      upstreamModel: model,
+      thinkingMode: model === "qwen38" || model === "qwen38-sglang" ? "disabled" : "inherit",
+      ...(context ? { contextWindow: context } : {}),
+    });
   }
   return <>
     <div className="page-heading compact-heading"><div><span className="eyebrow">MODEL ROUTES</span><h1>Map each Claude role to your model</h1><p>Claude keeps its role names. Map each role to the model ID used by your provider.</p></div><div className="heading-actions"><button className="button button-secondary" disabled={Boolean(busy)} onClick={onPing}>{busy === "ping" ? "Pinging…" : "Ping provider API"}</button><button className="button button-primary" disabled={Boolean(busy)} onClick={onSave}>{busy === "save" ? "Saving…" : "Save model routes"}</button></div></div>
@@ -675,6 +680,18 @@ function ModelsPage({ draft, setDraft, newRole, setNewRole, newModel, setNewMode
             <label className="field"><span>Display name in Claude</span><input value={route.displayName} onChange={(e) => updateRoute(index, { displayName: e.target.value })} placeholder={route.routeId} /></label>
             <label className="field"><span>Context limit <small>tokens</small></span><input dir="ltr" type="number" min="0" value={route.contextWindow || ""} onChange={(e) => updateRoute(index, { contextWindow: Number(e.target.value) || 0 })} placeholder="For example, 200000" /></label>
             <label className="field"><span>Maximum output <small>0 = no local limit</small></span><input dir="ltr" type="number" min="0" value={route.maxOutputTokens || ""} onChange={(e) => updateRoute(index, { maxOutputTokens: Number(e.target.value) || 0 })} placeholder="Optional" /></label>
+            <label className="field"><span>Thinking mode</span>
+              <ThemeSelect
+                value={route.thinkingMode || (route.upstreamModel === "qwen38" || route.upstreamModel === "qwen38-sglang" ? "disabled" : "inherit")}
+                options={[
+                  { value: "inherit", label: "Provider / client default" },
+                  { value: "disabled", label: "Disabled (Qwen38 recommended)" },
+                  { value: "enabled", label: "Enabled" },
+                ]}
+                onChange={(value) => updateRoute(index, { thinkingMode: value as ModelRoute["thinkingMode"] })}
+              />
+              <small className="field-hint">Qwen38 defaults to non-thinking as documented by your provider. This setting affects only this model route.</small>
+            </label>
           </div>
         </article>;
       })}
