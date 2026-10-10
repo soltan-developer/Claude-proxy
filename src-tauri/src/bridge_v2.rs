@@ -6013,7 +6013,11 @@ mod tests {
         let mut config = AppConfig::default();
         config.web_access_mode = "required".into();
         let mut payload = json!({ "messages": [{ "role": "user", "content": "سلام" }] });
-        assert!(!add_web_tools(&mut payload, &config, classify_web_intent(&request)));
+        assert!(!add_web_tools(
+            &mut payload,
+            &config,
+            classify_web_intent(&request)
+        ));
         assert!(payload.get("tools").is_none());
         assert!(payload.get("tool_choice").is_none());
     }
@@ -6057,7 +6061,10 @@ mod tests {
             "messages": [{"role":"user","content":"Read my local GitHub repo"}],
             "tools": [{"name":"Read","input_schema":{"type":"object"}}]
         });
-        assert!(client_tools_take_precedence(ContractMode::Enforce, &request));
+        assert!(client_tools_take_precedence(
+            ContractMode::Enforce,
+            &request
+        ));
         assert!(!client_tools_take_precedence(ContractMode::Off, &request));
 
         let mut config = AppConfig::default();
@@ -6074,7 +6081,8 @@ mod tests {
                 max_output_tokens: 4_096,
                 is_default: true,
             },
-        ).unwrap();
+        )
+        .unwrap();
         let web_intent = if client_tools_take_precedence(ContractMode::Enforce, &request) {
             WebIntent::NoWeb
         } else {
