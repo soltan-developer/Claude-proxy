@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - v2/automatic-provider-network-recovery
+      - v2/2.0.9-direct-provider-fidelity
   workflow_dispatch:
 
 permissions:
