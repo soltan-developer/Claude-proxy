@@ -942,6 +942,83 @@ async fn real_http_client_read_is_not_hijacked_by_required_web_or_host_shell() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+// A fresh Cowork chat can contain an agent bootstrap user turn before
+// the visible greeting. Neither the estimated context budget nor a provider
+// overflow may silently erase that startup turn when native tools are present.
+async fn cowork_bootstrap_provider(Json(payload): Json<Value>) -> Json<Value> {
+    let messages = payload["messages"].as_array().expect("forwarded messages");
+    assert_eq!(
+        messages.len(),
+        2,
+        "agent bootstrap and greeting must survive"
+    );
+    assert_eq!(messages[0]["content"], "Cowork workspace startup");
+    assert_eq!(messages[1]["content"], "سلام");
+    assert_eq!(payload["tools"][0]["function"]["name"], "Bash");
+    Json(json!({
+        "id": "cowork-bootstrap-preserved",
+        "choices": [{"finish_reason":"stop","message":{
+            "role":"assistant", "content":"سلام!"
+        }}],
+        "usage":{"prompt_tokens":35,"completion_tokens":5}
+    }))
+}
+
+#[tokio::test]
+async fn cowork_native_tools_preserve_bootstrap_under_small_configured_window() {
+    let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider_port = provider.local_addr().unwrap().port();
+    let upstream = tokio::spawn(async move {
+        axum::serve(
+            provider,
+            Router::new().route("/v1/chat/completions", post(cowork_bootstrap_provider)),
+        )
+        .await
+        .unwrap();
+    });
+    let (state, dir) = test_server_state(provider_port, ContractMode::Off);
+    {
+        let mut config = state.config.write().await;
+        config.auto_trim_on_context_overflow = true;
+        config.routes[0].context_window = 700;
+        config.web_access_mode = "required".into();
+    }
+    let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = gateway.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            gateway,
+            Router::new()
+                .route("/v1/messages", post(anthropic_messages))
+                .with_state(state),
+        )
+        .await
+        .unwrap();
+    });
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .bearer_auth("test-gateway-token")
+        .json(&json!({
+            "model":"claude-sonnet-5-5", "stream":false, "max_tokens":512,
+            "messages":[
+                {"role":"user","content":"Cowork workspace startup"},
+                {"role":"user","content":"سلام"}
+            ],
+            "tools":[{"name":"Bash","input_schema":{"type":"object","properties":{
+                "command":{"type":"string"}
+            }},"description":"Runs a workspace command"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let reply: Value = response.json().await.unwrap();
+    assert_eq!(reply["content"][0]["text"], "سلام!");
+    server.abort();
+    upstream.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 // Mock endpoint checks the outbound request, not language quality.
 async fn greeting_with_environment_capture(Json(payload): Json<Value>) -> Json<Value> {
     let messages = payload["messages"].as_array().expect("messages forwarded");
