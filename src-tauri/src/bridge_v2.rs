@@ -284,6 +284,7 @@ struct BridgeState {
 #[derive(Clone)]
 struct ServerState {
     config: Arc<RwLock<AppConfig>>,
+    direct_provider_client: Client,
     upstream_clients: Arc<Vec<Client>>,
     upstream_cursor: Arc<AtomicUsize>,
     upstream_slots: Arc<Semaphore>,
@@ -1298,6 +1299,7 @@ async fn start_proxy_inner(state: &BridgeState) -> Result<(), String> {
         .with_state(ServerState {
             config: state.config.clone(),
             upstream_clients: state.upstream_clients.clone(),
+            direct_provider_client: state.direct_provider_client.clone(),
             upstream_cursor: state.upstream_cursor.clone(),
             upstream_slots: state.upstream_slots.clone(),
             web_slots: state.web_slots.clone(),
@@ -5530,11 +5532,13 @@ pub fn run() {
                 .first()
                 .cloned()
                 .ok_or_else(|| "The upstream client pool could not be initialized.".to_string())?;
+            let direct_provider_client = build_direct_provider_client()?;
             let state = BridgeState {
                 app: app.handle().clone(),
                 config: Arc::new(RwLock::new(config)),
                 runtime: Arc::new(Mutex::new(None)),
                 client,
+                direct_provider_client,
                 upstream_clients: Arc::new(upstream_clients),
                 upstream_cursor: Arc::new(AtomicUsize::new(0)),
                 upstream_slots: Arc::new(Semaphore::new(UPSTREAM_CONCURRENCY)),
