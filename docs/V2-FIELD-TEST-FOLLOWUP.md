@@ -35,7 +35,14 @@ Chinese format-only instructions with an old GitHub turn have no injected
 web tools even in required mode.
 
 HTTP regression tests check actual translated requests to an upstream
-fake provider, including retention of explicit client Read tools. V2
+fake provider, including retention of explicit client Read tools.
+
+Critical second path: in strict V2, when Claude Code/Cowork provides its own
+tool definitions, the proxy must NOT inject a competing local web/shell tool
+or force tool_choice=claude_proxy_web_search, even when web mode is required
+and the user asks about a GitHub repository. Client-owned Read/Bash tools
+retain their identities and receive normal tool_use responses. The legacy
+bridge behavior remains unchanged for clients without declared tools. V2
 diagnostics record web routing decision and counts but NO text, tool arguments,
 file paths or secrets.
 
