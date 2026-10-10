@@ -18,6 +18,8 @@ import {
   loadConfig,
   openCreatorLink,
   pingProvider,
+  probeProviderFidelity,
+  type ProviderProbeResult,
   quitApplication,
   saveConfig,
   startProxy,
@@ -55,6 +57,7 @@ function App() {
   const [wizardStep, setWizardStep] = useState(0);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
+  const [providerProbeResults, setProviderProbeResults] = useState<ProviderProbeResult[]>([]);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const [toastTone, setToastTone] = useState<ToastTone>("success");
@@ -241,6 +244,19 @@ function App() {
     finally { setBusy(""); }
   }
 
+  async function handleProbeProvider() {
+    setBusy("probe");
+    setError("");
+    setProviderProbeResults([]);
+    try {
+      await persist(draft, draft.setupComplete);
+      const results = await probeProviderFidelity();
+      setProviderProbeResults(results);
+      showToast(results.every((result) => result.passed) ? "Isolated model probes passed." : "At least one direct model probe did not follow instructions.", results.every((result) => result.passed) ? "success" : "error");
+    } catch (reason) { setError(messageOf(reason)); }
+    finally { setBusy(""); }
+  }
+
   async function minimizeWindow() {
     if (isTauriRuntime()) await getCurrentWindow().minimize();
   }
@@ -371,7 +387,7 @@ function App() {
           ) : page === "overview" ? (
             <Overview config={config} draft={draft} status={status} localUrl={localUrl} ready={ready} onCopy={() => void copy(localUrl)} onGo={(target) => setPage(target)} onWizard={() => { setWizard(true); setWizardStep(0); }} />
           ) : page === "connection" ? (
-            <ConnectionPage language={language} draft={draft} setDraft={setDraft} secret={secret} setSecret={setSecret} clearSecret={clearSecret} setClearSecret={setClearSecret} busy={busy} isTauri={isTauriRuntime()} onSave={() => void saveCurrent()} onFetch={() => void handleFetchModels()} onPing={() => void handlePingProvider()} onTest={() => void act("test", testLocalRoute, (result) => String(result))} />
+            <ConnectionPage language={language} draft={draft} setDraft={setDraft} secret={secret} setSecret={setSecret} clearSecret={clearSecret} setClearSecret={setClearSecret} busy={busy} isTauri={isTauriRuntime()} onSave={() => void saveCurrent()} onFetch={() => void handleFetchModels()} onPing={() => void handlePingProvider()} onProbe={() => void handleProbeProvider()} probeResults={providerProbeResults} onTest={() => void act("test", testLocalRoute, (result) => String(result))} />
           ) : page === "models" ? (
             <ModelsPage draft={draft} setDraft={setDraft} newRole={newRole} setNewRole={setNewRole} newModel={newModel} setNewModel={setNewModel} addRoute={addRoute} updateRoute={updateRoute} removeRoute={removeRoute} onSave={() => void saveCurrent()} onFetch={() => void handleFetchModels()} onPing={() => void handlePingProvider()} busy={busy} />
           ) : page === "clients" ? (
@@ -518,8 +534,8 @@ function Overview({ config, draft, status, localUrl, ready, onCopy, onGo, onWiza
   </>;
 }
 
-function ConnectionPage({ language, draft, setDraft, secret, setSecret, clearSecret, setClearSecret, busy, isTauri, onSave, onFetch, onPing, onTest }: {
-  language: Language; draft: Draft; setDraft: Dispatch<SetStateAction<Draft>>; secret: string; setSecret: (value: string) => void; clearSecret: boolean; setClearSecret: (value: boolean) => void; busy: string; isTauri: boolean; onSave: () => void; onFetch: () => void; onPing: () => void; onTest: () => void;
+function ConnectionPage({ language, draft, setDraft, secret, setSecret, clearSecret, busy, isTauri, onSave, onFetch, onPing, onProbe, probeResults, onTest }: {
+  language: Language; draft: Draft; setDraft: Dispatch<SetStateAction<Draft>>; secret: string; setSecret: (value: string) => void; clearSecret: boolean; setClearSecret: (value: boolean) => void; busy: string; isTauri: boolean; onSave: () => void; onFetch: () => void; onPing: () => void; onProbe: () => void; probeResults: ProviderProbeResult[]; onTest: () => void;
 }) {
   const [showSecret, setShowSecret] = useState(false);
 
@@ -559,8 +575,20 @@ function ConnectionPage({ language, draft, setDraft, secret, setSecret, clearSec
           <label className="field"><span>Authentication</span><ThemeSelect value={draft.authStyle} options={[{ value: "bearer", label: "Bearer token" }, { value: "api_key", label: "api-key header" }]} onChange={(value) => setDraft((c) => ({ ...c, authStyle: value as BridgeConfig["authStyle"] }))} /></label>
           <label className="field"><span>Local port</span><input dir="ltr" type="number" min="1024" max="65535" value={draft.proxyPort} onChange={(e) => setDraft((c) => ({ ...c, proxyPort: Math.min(65535, Math.max(1024, Number(e.target.value) || 18181)) }))} /><small className="field-hint">The default is 18181. Choose another available port if it is in use. Apply the Claude settings again after changing it.</small></label>
         </div>
-        <div className="button-row connection-actions"><button className="button button-primary" disabled={Boolean(busy)} onClick={onSave}>{busy === "save" ? "Saving…" : "Save settings"}</button><button className="button button-secondary" disabled={!isTauri || Boolean(busy)} onClick={onFetch}>{busy === "fetch" ? "Checking…" : "Check connection and fetch models"}</button><button className="button button-secondary" disabled={!isTauri || Boolean(busy)} onClick={onPing}>{busy === "ping" ? "Pinging provider…" : "Ping provider API"}</button></div>
-        <p className="field-hint">Ping checks the provider’s /v1/models endpoint. Some providers may not expose this endpoint.</p>
+        <div className="button-row connection-actions"><button className="button button-primary" disabled={Boolean(busy)} onClick={onSave}>{busy === "save" ? "Saving…" : "Save settings"}</button><button className="button button-secondary" disabled={!isTauri || Boolean(busy)} onClick={onFetch}>{busy === "fetch" ? "Checking…" : "Check connection and fetch models"}</button><button className="button button-secondary" disabled={!isTauri || Boolean(busy)} onClick={onPing}>{busy === "ping" ? "Checking API…" : "Check API + direct TCP timing"}</button></div>
+        <p className="field-hint">Direct TCP connection time is measured separately from the authenticated /v1/models API response time. Neither is ICMP ping. Provider API requests bypass v2rayN by default; only Web Search may use its configured proxy.</p>
+        <div className="button-row connection-actions">
+          <button className="button button-secondary" disabled={!isTauri || Boolean(busy)} onClick={onProbe}>{busy === "probe" ? "Testing model…" : "Test upstream model instructions (2 requests)"}</button>
+        </div>
+        <p className="field-hint">This optional test sends two small, synthetic prompts directly to the mapped default upstream model. It uses no chat history, local tools or Web Search; provider usage fees may apply.</p>
+        {probeResults.length > 0 && <section className="card form-card" aria-label="Isolated provider fidelity results">
+          <h3>Isolated upstream model results</h3>
+          {probeResults.map((result) => <div key={result.marker} className="field-hint">
+            <strong>{result.passed ? "PASS" : "FAIL"} — {result.language} / {result.marker}</strong>
+            <div>Upstream: {result.model} · {result.responseMs} ms · tool calls: {result.toolCalls}</div>
+            <div dir="auto" style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>{result.reply || "(empty provider reply)"}</div>
+          </div>)}
+        </section>}
         {!isTauri && <p className="preview-note">Live connections are unavailable in the browser preview. Use the Windows app.</p>}
       </section>
       <section className="card form-card overflow-card">
