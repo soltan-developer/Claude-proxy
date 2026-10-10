@@ -1059,10 +1059,14 @@ async fn provider_http_failure_is_not_replayed_as_direct_retry() {
 }
 
 #[test]
-fn provider_proxy_mode_defaults_auto_and_supports_safe_opt_out() {
-    assert_eq!(ProviderProxyMode::from_setting(""), ProviderProxyMode::Auto);
+fn provider_proxy_mode_defaults_direct_and_requires_explicit_system_opt_in() {
+    assert_eq!(ProviderProxyMode::from_setting(""), ProviderProxyMode::Direct);
     assert_eq!(
         ProviderProxyMode::from_setting("bad"),
+        ProviderProxyMode::Direct
+    );
+    assert_eq!(
+        ProviderProxyMode::from_setting("auto"),
         ProviderProxyMode::Auto
     );
     assert_eq!(
@@ -1073,4 +1077,47 @@ fn provider_proxy_mode_defaults_auto_and_supports_safe_opt_out() {
         ProviderProxyMode::from_setting(" direct "),
         ProviderProxyMode::Direct
     );
+}
+
+
+#[tokio::test]
+async fn provider_direct_mode_never_dials_a_configured_dead_system_proxy() {
+    let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = upstream.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            upstream,
+            Router::new().route("/v1/chat/completions", post(provider_recovery_echo)),
+        )
+        .await
+        .unwrap();
+    });
+    let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_port = dead.local_addr().unwrap().port();
+    drop(dead);
+    let inherited_proxy_client = Client::builder()
+        .proxy(Proxy::all(format!("http://127.0.0.1:{dead_port}")).unwrap())
+        .build()
+        .unwrap();
+    let direct = build_direct_provider_client().unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "claude-proxy-direct-default-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let diag = ObservabilityStore::new(dir.join("usage.jsonl"), dir.join("diag.jsonl"));
+    let response = send_provider_with_mode(
+        inherited_proxy_client
+            .post(format!("http://127.0.0.1:{upstream_port}/v1/chat/completions"))
+            .json(&json!({"marker":"DIRECT-209"})),
+        &direct,
+        &diag,
+        ProviderProxyMode::from_setting(""),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: Value = response.json().await.unwrap();
+    assert_eq!(result["choices"][0]["message"]["content"], "DIRECT-209");
+    server.abort();
+    let _ = std::fs::remove_dir_all(dir);
 }
