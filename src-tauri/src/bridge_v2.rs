@@ -648,36 +648,64 @@ fn asks_for_fresh_information(text: &str) -> bool {
     .any(|term| text.contains(term))
 }
 
-// In strict V2, Claude Code and Cowork own execution of their declared
-// client-side tools (Read, Bash, AskUserQuestion, etc.). An injected local
-// web/shell bridge or a forced tool_choice can steal their next action.
-// The built-in bridge remains available for tool-less clients.
-fn client_tools_take_precedence(mode: ContractMode, request: &Value) -> bool {
-    mode == ContractMode::Enforce
-        && request
-            .get("tools")
-            .and_then(Value::as_array)
-            .is_some_and(|tools| !tools.is_empty())
+// The client always owns its declared tools, regardless of the experimental
+// V2 contract flag. Inserting a provider-side search tool (or forced choice)
+// alongside Claude Code/Cowork tools steals control of the user's request.
+fn client_tools_take_precedence(request: &Value) -> bool {
+    request
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty())
+}
+
+// Control-plane text sometimes travels inside a user content block (for
+// example Claude Code's <system-reminder> about the working directory).
+// It must be forwarded unmodified to the provider, but must NEVER authorize
+// a local web search. Strip only for optional intent classification.
+fn user_text_for_web_intent(raw: &str) -> String {
+    let mut cleaned = raw.to_owned();
+    for tag in ["system-reminder", "environment_context"] {
+        let opening = format!("<{tag}>");
+        let closing = format!("</{tag}>");
+        while let Some(start) = cleaned.find(&opening) {
+            if let Some(end) = cleaned[start + opening.len()..].find(&closing) {
+                let end = start + opening.len() + end + closing.len();
+                cleaned.replace_range(start..end, "");
+            } else {
+                // Unclosed control metadata is never evidence of user intent.
+                cleaned.truncate(start);
+                break;
+            }
+        }
+    }
+    cleaned.trim().to_owned()
 }
 
 fn classify_web_intent(request: &Value) -> WebIntent {
     let Some(messages) = request.get("messages").and_then(Value::as_array) else {
-        return WebIntent::Automatic;
+        return WebIntent::NoWeb;
     };
     let latest_user_text = messages
         .iter()
         .rev()
         .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-        .map(|message| anthropic_text(message.get("content").unwrap_or(&Value::Null)))
+        .map(|message| {
+            user_text_for_web_intent(&anthropic_text(
+                message.get("content").unwrap_or(&Value::Null),
+            ))
+        })
         .unwrap_or_default();
+    if latest_user_text.is_empty() {
+        return WebIntent::NoWeb;
+    }
     if has_direct_public_url(&latest_user_text) {
         return WebIntent::Fetch;
     }
     let github_was_in_chat = messages.iter().any(|message| {
         message.get("role").and_then(Value::as_str) == Some("user")
-            && mentions_github_or_repository(&anthropic_text(
+            && mentions_github_or_repository(&user_text_for_web_intent(&anthropic_text(
                 message.get("content").unwrap_or(&Value::Null),
-            ))
+            )))
     });
     // Each new turn determines tool intent. An old GitHub mention is context,
     // not permission to inject web tools into a new greeting or a language-only
@@ -689,7 +717,14 @@ fn classify_web_intent(request: &Value) -> WebIntent {
         && (asks_to_revisit_repository(&latest_user_text)
             || asks_for_contextual_opinion(&latest_user_text)
             || asks_for_new_search(&latest_user_text));
-    if !current_repo_intent && !current_fresh_intent && !explicit_repo_followup {
+    // Mentioning a repository in environment metadata or conversational
+    // context is not an instruction to search it. Require a current action,
+    // a public URL, or a fresh-information question.
+    if !(current_fresh_intent
+        || asks_for_new_search(&latest_user_text)
+        || asks_to_revisit_repository(&latest_user_text)
+        || explicit_repo_followup)
+    {
         return WebIntent::NoWeb;
     }
     if github_was_in_chat && asks_to_revisit_repository(&latest_user_text) {
@@ -2062,25 +2097,12 @@ async fn process_anthropic_messages(
     // V2 capability checks run on the fully translated payload, including
     // client tools, historical tool results, and optional local gateway tools.
     // They never guess from model names or silently degrade Code into chat.
-    let client_tools_owned = client_tools_take_precedence(state.v2_contract_mode, &request);
+    let client_tools_owned = client_tools_take_precedence(&request);
     let web_intent = if client_tools_owned {
         WebIntent::NoWeb
     } else {
         classify_web_intent(&request)
     };
-    // Store only routing decisions and counts. Never log the current prompt,
-    // previous messages, tool arguments, account secrets or file paths.
-    if state.v2_contract_mode != ContractMode::Off {
-        state.observability.log(
-            "info",
-            "v2 tool routing",
-            &format!(
-                "Request {request_id}: web_intent={web_intent:?}, client_tools_owned={client_tools_owned}, client_tool_definitions={}, client_message_count={}.",
-                request.get("tools").and_then(Value::as_array).map_or(0, Vec::len),
-                request.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
-            ),
-        );
-    }
     let web_enabled = add_web_tools(&mut payload, &config, web_intent);
     let shell_enabled = if client_tools_owned {
         false
@@ -2088,6 +2110,19 @@ async fn process_anthropic_messages(
         add_shell_tool(&mut payload, &config)
     };
     let local_tools_enabled = web_enabled || shell_enabled;
+    // An audit of the request SHAPE, not the content: safe to keep enabled
+    // even when the V2 contract flag is off. The diagnostic page can prove
+    // whether the gateway itself added web tools to a specific request.
+    state.observability.log(
+        "info",
+        "tool routing",
+        &format!(
+            "Request {request_id}: client_tools={}, client_messages={}, web_intent={web_intent:?}, client_tools_owned={client_tools_owned}, local_web={web_enabled}, local_shell={shell_enabled}, forced_tool_choice={}.",
+            request.get("tools").and_then(Value::as_array).map_or(0, Vec::len),
+            request.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
+            payload.get("tool_choice").is_some(),
+        ),
+    );
     if let Some(result) = state
         .v2_capabilities
         .assess(&route.upstream_model, &payload)
@@ -3097,7 +3132,9 @@ fn web_tool_definitions() -> Vec<Value> {
 }
 
 fn add_web_tools(payload: &mut Value, config: &AppConfig, web_intent: WebIntent) -> bool {
-    if !web_tools_enabled(config) || web_intent == WebIntent::NoWeb {
+    if !web_tools_enabled(config)
+        || matches!(web_intent, WebIntent::NoWeb | WebIntent::ReuseContext)
+    {
         return false;
     }
     let instruction = web_bridge_system_instruction(config, web_intent);
@@ -6646,11 +6683,7 @@ mod tests {
             "messages": [{"role":"user","content":"Read my local GitHub repo"}],
             "tools": [{"name":"Read","input_schema":{"type":"object"}}]
         });
-        assert!(client_tools_take_precedence(
-            ContractMode::Enforce,
-            &request
-        ));
-        assert!(!client_tools_take_precedence(ContractMode::Off, &request));
+        assert!(client_tools_take_precedence(&request));
 
         let mut config = AppConfig::default();
         config.web_access_mode = "required".into();
@@ -6669,7 +6702,7 @@ mod tests {
             },
         )
         .unwrap();
-        let web_intent = if client_tools_take_precedence(ContractMode::Enforce, &request) {
+        let web_intent = if client_tools_take_precedence(&request) {
             WebIntent::NoWeb
         } else {
             classify_web_intent(&request)
