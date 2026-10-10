@@ -1060,7 +1060,10 @@ async fn provider_http_failure_is_not_replayed_as_direct_retry() {
 
 #[test]
 fn provider_proxy_mode_defaults_direct_and_requires_explicit_system_opt_in() {
-    assert_eq!(ProviderProxyMode::from_setting(""), ProviderProxyMode::Direct);
+    assert_eq!(
+        ProviderProxyMode::from_setting(""),
+        ProviderProxyMode::Direct
+    );
     assert_eq!(
         ProviderProxyMode::from_setting("bad"),
         ProviderProxyMode::Direct
@@ -1078,7 +1081,6 @@ fn provider_proxy_mode_defaults_direct_and_requires_explicit_system_opt_in() {
         ProviderProxyMode::Direct
     );
 }
-
 
 #[tokio::test]
 async fn provider_direct_mode_never_dials_a_configured_dead_system_proxy() {
@@ -1107,7 +1109,9 @@ async fn provider_direct_mode_never_dials_a_configured_dead_system_proxy() {
     let diag = ObservabilityStore::new(dir.join("usage.jsonl"), dir.join("diag.jsonl"));
     let response = send_provider_with_mode(
         inherited_proxy_client
-            .post(format!("http://127.0.0.1:{upstream_port}/v1/chat/completions"))
+            .post(format!(
+                "http://127.0.0.1:{upstream_port}/v1/chat/completions"
+            ))
             .json(&json!({"marker":"DIRECT-209"})),
         &direct,
         &diag,
@@ -1121,7 +1125,6 @@ async fn provider_direct_mode_never_dials_a_configured_dead_system_proxy() {
     server.abort();
     let _ = std::fs::remove_dir_all(dir);
 }
-
 
 #[test]
 fn isolated_probe_is_single_turn_and_has_no_client_or_web_tools() {
