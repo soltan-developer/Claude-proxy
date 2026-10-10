@@ -658,6 +658,14 @@ fn client_tools_take_precedence(request: &Value) -> bool {
         .is_some_and(|tools| !tools.is_empty())
 }
 
+// Cowork/Claude Code own their tool definitions and their initial session
+// bootstrap messages. A local heuristic must not silently remove any of that
+// conversation to fit a configured context-window approximation. On overflow
+// we must return a visible capacity error instead.
+fn may_auto_trim_context(config: &AppConfig, client_tools_owned: bool) -> bool {
+    config.auto_trim_on_context_overflow && !client_tools_owned
+}
+
 // Control-plane text sometimes travels inside a user content block (for
 // example Claude Code's <system-reminder> about the working directory).
 // It must be forwarded unmodified to the provider, but must NEVER authorize
@@ -2110,6 +2118,7 @@ async fn process_anthropic_messages(
     // client tools, historical tool results, and optional local gateway tools.
     // They never guess from model names or silently degrade Code into chat.
     let client_tools_owned = client_tools_take_precedence(&request);
+    let may_trim_context = may_auto_trim_context(&config, client_tools_owned);
     let web_intent = if client_tools_owned {
         WebIntent::NoWeb
     } else {
@@ -2148,11 +2157,12 @@ async fn process_anthropic_messages(
     // a one-word message like "سلام" is trivially reversible.
     let inbound_greeting = is_simple_greeting_request(&inbound_last_user);
     let outbound_greeting = is_simple_greeting_request(&outbound_last_user);
+    let last_user_text_preserved = inbound_last_user == outbound_last_user;
     state.observability.log(
         "info",
         "request provenance",
         &format!(
-            "Request {request_id}: inbound_greeting={inbound_greeting}, outbound_greeting={outbound_greeting}, inbound_message_count={}, upstream_message_count={}, streaming={client_wants_stream}.",
+            "Request {request_id}: inbound_greeting={inbound_greeting}, outbound_greeting={outbound_greeting}, last_user_text_preserved={last_user_text_preserved}, inbound_message_count={}, upstream_message_count={}, streaming={client_wants_stream}, client_tool_context_preserved={client_tools_owned}.",
             request.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
             payload.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
         ),
@@ -2211,7 +2221,7 @@ async fn process_anthropic_messages(
     };
     let mut trimmed_turns = 0usize;
     let mut proactive_trimmed_turns = 0usize;
-    if config.auto_trim_on_context_overflow && route.context_window > 0 {
+    if may_trim_context && route.context_window > 0 {
         // Reserve output room for the budget the client actually asked for,
         // not the conversion-time cap: in a long conversation that cap is
         // already squeezed against the pre-trim input, which would make the
@@ -2390,7 +2400,7 @@ async fn process_anthropic_messages(
             // trim budget here: a long conversation can hold far more turns
             // than a small cap, and stopping early while more turns were
             // still droppable turned long chats into dead ends.
-            if config.auto_trim_on_context_overflow
+            if may_trim_context
                 && is_context_overflow(&message)
                 && trim_oldest_turn(&mut payload)
             {
@@ -2430,7 +2440,17 @@ async fn process_anthropic_messages(
                 ),
             );
             let message = if is_context_overflow(&message) {
-                format!("The context limit was reached. Claude's visible history has not changed. Summarize an older message or enable automatic trimming of older turns. Gateway response: {}", truncate(&message, 900))
+                if client_tools_owned {
+                    format!(
+                        "COWORK_CONTEXT_TOO_LARGE: Cowork/Claude Code tool and session context exceeds the selected provider capacity. The proxy preserved the client messages and did not silently delete its setup or tool history. Select a model with sufficient context, or reduce the agent task scope. Provider response: {}",
+                        truncate(&message, 600)
+                    )
+                } else {
+                    format!(
+                        "The context limit was reached. Claude's visible history has not changed. Summarize an older message or enable automatic trimming of older turns. Gateway response: {}",
+                        truncate(&message, 900)
+                    )
+                }
             } else {
                 truncate(&message, 1200)
             };
@@ -6495,6 +6515,36 @@ mod tests {
             isolated_probe_checks("你好 ZH-884", "ZH-884", "Chinese", 1),
             (false, true, true)
         );
+    }
+
+    #[test]
+    fn cowork_and_code_tool_context_is_never_proactively_trimmed() {
+        let config = AppConfig::default();
+        assert!(config.auto_trim_on_context_overflow);
+        let agent_request = json!({
+            "tools": [{"name":"Bash","input_schema":{"type":"object"}}],
+            "messages": [
+                {"role":"user","content":"<system-reminder>Bootstrap agent session</system-reminder>"},
+                {"role":"user","content":"سلام"}
+            ]
+        });
+        assert!(client_tools_take_precedence(&agent_request));
+        assert!(!may_auto_trim_context(&config, client_tools_take_precedence(&agent_request)));
+        // A long tool definition should never justify erasing the bootstrap
+        // turn before the provider has even evaluated the request.
+        let mut payload = json!({"messages": [
+            {"role":"system","content":"original system"},
+            {"role":"user","content":"Cowork bootstrap"},
+            {"role":"user","content":"سلام"}
+        ]});
+        if may_auto_trim_context(&config, true) {
+            trim_to_context_budget(&mut payload, 1, 512);
+        }
+        assert_eq!(payload["messages"].as_array().unwrap().len(), 3);
+        assert!(may_auto_trim_context(&config, false));
+        let mut disabled = config;
+        disabled.auto_trim_on_context_overflow = false;
+        assert!(!may_auto_trim_context(&disabled, false));
     }
 
     #[test]
