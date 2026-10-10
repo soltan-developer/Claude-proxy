@@ -1087,6 +1087,27 @@ async fn fetch_models(state: TauriState<'_, BridgeState>) -> Result<Vec<String>,
     Ok(models)
 }
 
+// TCP connect measures DNS + TCP handshake, not the provider's model-list
+// processing time and not ICMP latency. Never goes through the Web Search VPN.
+async fn measure_direct_provider_tcp_ms(provider_url: &str) -> Option<u128> {
+    let url = Url::parse(provider_url).ok()?;
+    let host = url.host_str()?.to_owned();
+    let port = url.port_or_known_default()?;
+    let started = Instant::now();
+    match tokio::time::timeout(
+        Duration::from_secs(8),
+        tokio::net::TcpStream::connect((host.as_str(), port)),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => {
+            drop(stream);
+            Some(started.elapsed().as_millis())
+        }
+        _ => None,
+    }
+}
+
 #[tauri::command]
 async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, String> {
     let config = state.config.read().await.clone();
@@ -1094,13 +1115,18 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
         return Err("Enter a provider URL before checking its API.".into());
     }
     let url = upstream_url(&config.base_url, "models")?;
-    let mut request = state.client.get(url).timeout(Duration::from_secs(15));
+    let mut request = state.client.get(&url).timeout(Duration::from_secs(15));
     request = add_upstream_auth(request, &config)?;
-    let started = std::time::Instant::now();
-    let response =
-        send_provider_with_fallback(request, &state.direct_provider_client, &state.observability)
-            .await
-            .map_err(|error| {
+    let started = Instant::now();
+    let (tcp_ms, response) = tokio::join!(
+        measure_direct_provider_tcp_ms(&url),
+        send_provider_with_fallback(
+            request,
+            &state.direct_provider_client,
+            &state.observability,
+        )
+    );
+    let response = response.map_err(|error| {
                 state.observability.log(
                     "error",
                     "provider ping",
@@ -1121,13 +1147,18 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
             status.as_u16()
         ));
     }
+    let tcp_label = tcp_ms
+        .map(|ms| format!("{ms} ms (DNS + TCP connection)"))
+        .unwrap_or_else(|| "unavailable".to_string());
     state.observability.log(
         "info",
         "provider ping",
-        &format!("Provider API responded successfully in {elapsed} ms."),
+        &format!(
+            "Direct provider TCP connect: {tcp_label}; authenticated /v1/models response: {elapsed} ms."
+        ),
     );
     Ok(format!(
-        "Provider API responded in {elapsed} ms (HTTP {}).",
+        "Direct network TCP connect: {tcp_label}; API /v1/models response: {elapsed} ms (HTTP {}). These are not ICMP ping measurements.",
         status.as_u16()
     ))
 }
