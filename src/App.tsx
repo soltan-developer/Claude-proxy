@@ -11,6 +11,7 @@ import proxyActiveIcon from "./assets/proxy-active.png";
 import proxyOfflineIcon from "./assets/proxy-offline.png";
 import {
   applyClaudeCli,
+  applyClaudeCodeWebMcp,
   applyClaudeDesktop,
   fetchModels,
   getProxyStatus,
@@ -388,7 +389,7 @@ function App() {
           ) : page === "models" ? (
             <ModelsPage draft={draft} setDraft={setDraft} newRole={newRole} setNewRole={setNewRole} newModel={newModel} setNewModel={setNewModel} addRoute={addRoute} updateRoute={updateRoute} removeRoute={removeRoute} onSave={() => void saveCurrent()} onFetch={() => void handleFetchModels()} onPing={() => void handlePingProvider()} busy={busy} />
           ) : page === "clients" ? (
-            <ClientsPage config={draft} localUrl={localUrl} status={status} busy={busy} onCopy={() => void copy(localUrl)} onDesktop={() => void saveAndApply("desktop")} onCli={() => void saveAndApply("cli")} isTauri={isTauriRuntime()} />
+            <ClientsPage config={draft} localUrl={localUrl} status={status} busy={busy} onCopy={() => void copy(localUrl)} onDesktop={() => void saveAndApply("desktop")} onCli={() => void saveAndApply("cli")} onMcp={() => void act("mcp", applyClaudeCodeWebMcp, (result) => String(result))} isTauri={isTauriRuntime()} />
           ) : page === "usage" ? (
             <UsagePage isTauri={isTauriRuntime()} language={language} config={draft} />
           ) : page === "api-pool" ? (
@@ -726,8 +727,8 @@ function ModelsPage({ draft, setDraft, newRole, setNewRole, newModel, setNewMode
   </>;
 }
 
-function ClientsPage({ config, localUrl, status, busy, onCopy, onDesktop, onCli, isTauri }: {
-  config: Draft; localUrl: string; status: ProxyStatus; busy: string; onCopy: () => void; onDesktop: () => void; onCli: () => void; isTauri: boolean;
+function ClientsPage({ config, localUrl, status, busy, onCopy, onDesktop, onCli, onMcp, isTauri }: {
+  config: Draft; localUrl: string; status: ProxyStatus; busy: string; onCopy: () => void; onDesktop: () => void; onCli: () => void; onMcp: () => void; isTauri: boolean;
 }) {
   return <>
     <div className="page-heading compact-heading"><div><span className="eyebrow">CLIENT SETUP</span><h1>Connect Claude</h1><p>Claude Proxy writes the required settings directly to each client.</p></div></div>
@@ -736,6 +737,12 @@ function ClientsPage({ config, localUrl, status, busy, onCopy, onDesktop, onCli,
       <article className="client-card card"><div className="client-brand"><span className="client-logo claude-logo">✳</span><span className="client-label">CLAUDE DESKTOP</span></div><h2>Claude Desktop</h2><p>Writes the model routes and local gateway to the inference profile. Fully quit and reopen Claude Desktop after applying the settings.</p><div className="client-meta"><span>Configuration method</span><strong>Gateway profile</strong></div><button className="button button-primary button-wide" disabled={!isTauri || !config.routes.length || busy === "desktop"} onClick={onDesktop}>{busy === "desktop" ? "Applying…" : "Configure Claude Desktop"}</button></article>
       <article className="client-card card"><div className="client-brand"><span className="client-logo terminal-logo">›_</span><span className="client-label">CLAUDE CODE</span></div><h2>Claude Code</h2><p>Writes the required ANTHROPIC variables to your user settings. Close and reopen any active Claude Code sessions.</p><div className="client-meta"><span>Configuration method</span><strong>User settings</strong></div><button className="button button-primary button-wide" disabled={!isTauri || !config.routes.length || busy === "cli"} onClick={onCli}>{busy === "cli" ? "Applying…" : "Configure Claude Code"}</button></article>
     </div>
+    <section className="card" style={{ padding: 18, marginTop: 16 }}>
+      <h2>Web search tools for Claude Code (MCP)</h2>
+      <p>Register the local Claude Proxy web_search and web_fetch tools in Claude Code. This modifies only your local Claude Code MCP settings, creates a backup, and leaves other MCP tools untouched. Restart Claude Code and check /mcp after connecting.</p>
+      <button className="button button-secondary" disabled={!isTauri || busy.length > 0 || config.webAccessMode === "disabled"} onClick={onMcp}>{busy === "mcp" ? "Connecting MCP…" : "Connect web tools to Claude Code"}</button>
+      <p className="muted-copy">Enable and save Web access first. Cowork remote connectors cannot reach this localhost endpoint; its permissions are separate. No organization network policy is changed.</p>
+    </section>
     {!config.routes.length && <div className="context-note"><span>!</span><p>Map at least one Claude role to a provider model in Model routes first.</p></div>}
     {!isTauri && <div className="context-note"><span>i</span><p>Applying settings to Claude is available in the installed Windows app.</p></div>}
     <div className="security-note"><span>i</span><p>The provider API key is encrypted by the app. Only the local token Claude needs is written to that client's settings file.</p></div>

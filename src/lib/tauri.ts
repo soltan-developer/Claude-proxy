@@ -98,6 +98,11 @@ export async function applyClaudeCli(): Promise<string> {
   return invoke<string>("apply_claude_cli");
 }
 
+export async function applyClaudeCodeWebMcp(): Promise<string> {
+  if (!isTauriRuntime()) throw new Error("Claude Code Web MCP setup is only available in the Windows app.");
+  return invoke<string>("apply_claude_code_web_mcp");
+}
+
 export async function openCreatorLink(): Promise<void> {
   if (isTauriRuntime()) await invoke("open_creator_link");
   else window.open("https://eitaa.com/salmanzadeh_ir", "_blank", "noopener,noreferrer");
