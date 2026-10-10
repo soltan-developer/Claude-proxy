@@ -9,6 +9,7 @@ export type ModelRoute = {
   displayName: string;
   upstreamModel: string;
   tier: string;
+  thinkingMode: "inherit" | "disabled" | "enabled";
   contextWindow: number;
   maxOutputTokens: number;
   isDefault: boolean;

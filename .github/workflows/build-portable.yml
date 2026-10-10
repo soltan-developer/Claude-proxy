@@ -7,6 +7,7 @@ on:
       - v2/automatic-provider-network-recovery
       - v2/2.0.9-direct-provider-fidelity
       - v2/2.0.9-connection-architecture-ui-recovery
+      - v2/2.0.9-qwen-thinking-fidelity
       - v2/2.0.9-tool-fidelity-regressions
   workflow_dispatch:
 
