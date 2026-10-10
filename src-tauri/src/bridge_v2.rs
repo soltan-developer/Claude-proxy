@@ -1990,8 +1990,7 @@ fn mcp_response(id: &Value, result: Value) -> Response {
 }
 
 fn mcp_error(id: Value, code: i32, message: &'static str) -> Response {
-    Json(json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}}))
-        .into_response()
+    Json(json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})).into_response()
 }
 
 fn mcp_tool_list() -> Vec<Value> {
@@ -2008,10 +2007,7 @@ fn mcp_tool_list() -> Vec<Value> {
         .collect()
 }
 
-async fn mcp_get(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-) -> Response {
+async fn mcp_get(State(state): State<ServerState>, headers: HeaderMap) -> Response {
     let config = state.config.read().await.clone();
     if let Err(status) = mcp_access_allowed(&headers, &config) {
         return status.into_response();
@@ -2061,7 +2057,10 @@ async fn mcp_post(
             if name != "claude_proxy_web_search" && name != "claude_proxy_web_fetch" {
                 return mcp_error(id, -32602, "Unknown MCP web tool.");
             }
-            let args = request.pointer("/params/arguments").cloned().unwrap_or(json!({}));
+            let args = request
+                .pointer("/params/arguments")
+                .cloned()
+                .unwrap_or(json!({}));
             if !args.is_object() {
                 return mcp_error(id, -32602, "Tool arguments must be an object.");
             }
@@ -2140,7 +2139,9 @@ async fn apply_claude_code_web_mcp(
 ) -> Result<String, String> {
     let config = state.config.read().await.clone();
     if !web_tools_enabled(&config) {
-        return Err("Enable and save Web access in Advanced settings before connecting tools.".into());
+        return Err(
+            "Enable and save Web access in Advanced settings before connecting tools.".into(),
+        );
     }
     start_proxy_inner(state.inner()).await?;
     update_status_icon(&app, true);
@@ -6975,7 +6976,6 @@ mod tests {
             "DNS resolution failed (may differ from proxy DNS)"
         );
     }
-
 
     #[test]
     fn mcp_registration_preserves_other_claude_code_settings_and_tools() {
