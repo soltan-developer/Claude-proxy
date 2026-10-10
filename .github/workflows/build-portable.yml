@@ -8,6 +8,10 @@ on:
       - v2/2.0.9-direct-provider-fidelity
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
