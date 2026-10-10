@@ -942,6 +942,132 @@ async fn real_http_client_read_is_not_hijacked_by_required_web_or_host_shell() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+// Mock endpoint checks the outbound request, not language quality.
+async fn greeting_with_environment_capture(Json(payload): Json<Value>) -> Json<Value> {
+    let messages = payload["messages"].as_array().expect("messages forwarded");
+    // The fixture supplies no system prompt, so the forwarded request
+    // must contain exactly one (unaltered) user message.
+    assert_eq!(messages.len(), 1);
+    let user_text = messages[0]["content"].as_str().expect("user content");
+    assert!(user_text.ends_with("سلام"));
+    assert!(user_text.contains("<system-reminder>"));
+    assert!(payload.get("tools").is_none());
+    assert!(payload.get("tool_choice").is_none());
+    assert_eq!(payload["chat_template_kwargs"]["enable_thinking"], false);
+    Json(json!({
+        "id":"mock-greeting-metadata",
+        "choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"سلام!"}}],
+        "usage":{"prompt_tokens":40,"completion_tokens":4}
+    }))
+}
+
+#[tokio::test]
+async fn greeting_with_claude_environment_does_not_start_web_in_v2_off() {
+    let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider_port = provider.local_addr().unwrap().port();
+    let upstream = tokio::spawn(async move {
+        axum::serve(
+            provider,
+            Router::new().route(
+                "/v1/chat/completions",
+                post(greeting_with_environment_capture),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let (state, dir) = test_server_state(provider_port, ContractMode::Off);
+    {
+        let mut config = state.config.write().await;
+        config.web_access_mode = "required".into();
+        config.routes[0].upstream_model = "qwen38".into();
+    }
+    let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = gateway.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            gateway,
+            Router::new()
+                .route("/v1/messages", post(anthropic_messages))
+                .with_state(state),
+        )
+        .await
+        .unwrap();
+    });
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .bearer_auth("test-gateway-token")
+        .json(&json!({
+            "model":"claude-sonnet-5-5",
+            "max_tokens":128,
+            "stream":false,
+            "messages":[{"role":"user","content":
+                "<system-reminder>GitHub project. Please search this repo.</system-reminder>\nسلام"
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let reply: Value = response.json().await.unwrap();
+    assert_eq!(reply["content"][0]["text"], "سلام!");
+    server.abort();
+    upstream.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn client_tools_override_local_web_even_when_v2_flag_is_off() {
+    let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider_port = provider.local_addr().unwrap().port();
+    let upstream = tokio::spawn(async move {
+        axum::serve(
+            provider,
+            Router::new().route("/v1/chat/completions", post(client_tool_priority_mock)),
+        )
+        .await
+        .unwrap();
+    });
+    let (state, dir) = test_server_state(provider_port, ContractMode::Off);
+    {
+        let mut config = state.config.write().await;
+        config.web_access_mode = "required".into();
+        config.shell_access_mode = "auto".into();
+    }
+    let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = gateway.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            gateway,
+            Router::new()
+                .route("/v1/messages", post(anthropic_messages))
+                .with_state(state),
+        )
+        .await
+        .unwrap();
+    });
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .bearer_auth("test-gateway-token")
+        .json(&json!({
+            "model":"claude-sonnet-5-5",
+            "max_tokens":256,
+            "stream":false,
+            "messages":[{"role":"user","content":"Read my local GitHub repo README"}],
+            "tools":[{"name":"Read","input_schema":{"type":"object"}}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let reply: Value = response.json().await.unwrap();
+    assert_eq!(reply["stop_reason"], "tool_use");
+    assert_eq!(reply["content"][0]["name"], "Read");
+    server.abort();
+    upstream.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 // This HTTP test proves payload fidelity, not the live Qwen model's language
 // quality. It captures the exact translated request on a mock upstream.
 async fn qwen38_greeting_capture(Json(payload): Json<Value>) -> Json<Value> {

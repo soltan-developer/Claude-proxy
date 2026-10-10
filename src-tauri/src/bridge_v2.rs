@@ -648,36 +648,71 @@ fn asks_for_fresh_information(text: &str) -> bool {
     .any(|term| text.contains(term))
 }
 
-// In strict V2, Claude Code and Cowork own execution of their declared
-// client-side tools (Read, Bash, AskUserQuestion, etc.). An injected local
-// web/shell bridge or a forced tool_choice can steal their next action.
-// The built-in bridge remains available for tool-less clients.
-fn client_tools_take_precedence(mode: ContractMode, request: &Value) -> bool {
-    mode == ContractMode::Enforce
-        && request
-            .get("tools")
-            .and_then(Value::as_array)
-            .is_some_and(|tools| !tools.is_empty())
+// The client always owns its declared tools, regardless of the experimental
+// V2 contract flag. Inserting a provider-side search tool (or forced choice)
+// alongside Claude Code/Cowork tools steals control of the user's request.
+fn client_tools_take_precedence(request: &Value) -> bool {
+    request
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty())
+}
+
+// Control-plane text sometimes travels inside a user content block (for
+// example Claude Code's <system-reminder> about the working directory).
+// It must be forwarded unmodified to the provider, but must NEVER authorize
+// a local web search. Strip only for optional intent classification.
+fn user_text_for_web_intent(raw: &str) -> String {
+    let mut cleaned = raw.to_owned();
+    for tag in ["system-reminder", "environment_context"] {
+        let opening = format!("<{tag}>");
+        let closing = format!("</{tag}>");
+        while let Some(start) = cleaned.find(&opening) {
+            if let Some(end) = cleaned[start + opening.len()..].find(&closing) {
+                let end = start + opening.len() + end + closing.len();
+                cleaned.replace_range(start..end, "");
+            } else {
+                // Unclosed control metadata is never evidence of user intent.
+                cleaned.truncate(start);
+                break;
+            }
+        }
+    }
+    cleaned.trim().to_owned()
+}
+
+fn is_simple_greeting_request(text: &str) -> bool {
+    matches!(
+        user_text_for_web_intent(text).trim(),
+        "سلام" | "سلام!" | "سلام؟" | "hello" | "hi" | "Hi" | "Hello"
+    )
 }
 
 fn classify_web_intent(request: &Value) -> WebIntent {
     let Some(messages) = request.get("messages").and_then(Value::as_array) else {
-        return WebIntent::Automatic;
+        return WebIntent::NoWeb;
     };
     let latest_user_text = messages
         .iter()
         .rev()
         .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-        .map(|message| anthropic_text(message.get("content").unwrap_or(&Value::Null)))
+        .map(|message| {
+            user_text_for_web_intent(&anthropic_text(
+                message.get("content").unwrap_or(&Value::Null),
+            ))
+        })
         .unwrap_or_default();
+    if latest_user_text.is_empty() {
+        return WebIntent::NoWeb;
+    }
     if has_direct_public_url(&latest_user_text) {
         return WebIntent::Fetch;
     }
     let github_was_in_chat = messages.iter().any(|message| {
         message.get("role").and_then(Value::as_str) == Some("user")
-            && mentions_github_or_repository(&anthropic_text(
+            && mentions_github_or_repository(&user_text_for_web_intent(&anthropic_text(
                 message.get("content").unwrap_or(&Value::Null),
-            ))
+            )))
     });
     // Each new turn determines tool intent. An old GitHub mention is context,
     // not permission to inject web tools into a new greeting or a language-only
@@ -689,7 +724,19 @@ fn classify_web_intent(request: &Value) -> WebIntent {
         && (asks_to_revisit_repository(&latest_user_text)
             || asks_for_contextual_opinion(&latest_user_text)
             || asks_for_new_search(&latest_user_text));
-    if !current_repo_intent && !current_fresh_intent && !explicit_repo_followup {
+    // Mentioning a repository in environment metadata or conversational
+    // context is not an instruction to search it. Require a current action,
+    // a public URL, or a fresh-information question.
+    let has_repository_action = (github_was_in_chat || current_repo_intent)
+        && (asks_to_revisit_repository(&latest_user_text)
+            || asks_for_new_search(&latest_user_text));
+    let asks_fresh_question = current_fresh_intent
+        && (latest_user_text.contains('?')
+            || latest_user_text.contains('؟')
+            || asks_for_new_search(&latest_user_text)
+            || latest_user_text.to_ascii_lowercase().contains("tell me")
+            || latest_user_text.contains("بگو"));
+    if !(asks_fresh_question || has_repository_action || explicit_repo_followup) {
         return WebIntent::NoWeb;
     }
     if github_was_in_chat && asks_to_revisit_repository(&latest_user_text) {
@@ -2062,25 +2109,12 @@ async fn process_anthropic_messages(
     // V2 capability checks run on the fully translated payload, including
     // client tools, historical tool results, and optional local gateway tools.
     // They never guess from model names or silently degrade Code into chat.
-    let client_tools_owned = client_tools_take_precedence(state.v2_contract_mode, &request);
+    let client_tools_owned = client_tools_take_precedence(&request);
     let web_intent = if client_tools_owned {
         WebIntent::NoWeb
     } else {
         classify_web_intent(&request)
     };
-    // Store only routing decisions and counts. Never log the current prompt,
-    // previous messages, tool arguments, account secrets or file paths.
-    if state.v2_contract_mode != ContractMode::Off {
-        state.observability.log(
-            "info",
-            "v2 tool routing",
-            &format!(
-                "Request {request_id}: web_intent={web_intent:?}, client_tools_owned={client_tools_owned}, client_tool_definitions={}, client_message_count={}.",
-                request.get("tools").and_then(Value::as_array).map_or(0, Vec::len),
-                request.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
-            ),
-        );
-    }
     let web_enabled = add_web_tools(&mut payload, &config, web_intent);
     let shell_enabled = if client_tools_owned {
         false
@@ -2088,6 +2122,54 @@ async fn process_anthropic_messages(
         add_shell_tool(&mut payload, &config)
     };
     let local_tools_enabled = web_enabled || shell_enabled;
+    let inbound_last_user = request
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| {
+            messages
+                .iter()
+                .rev()
+                .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        })
+        .map(|message| anthropic_text(message.get("content").unwrap_or(&Value::Null)))
+        .unwrap_or_default();
+    let outbound_last_user = payload
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| {
+            messages
+                .iter()
+                .rev()
+                .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        })
+        .map(|message| anthropic_text(message.get("content").unwrap_or(&Value::Null)))
+        .unwrap_or_default();
+    // A greeting-category flag is deliberately not a prompt hash: hashing
+    // a one-word message like "سلام" is trivially reversible.
+    let inbound_greeting = is_simple_greeting_request(&inbound_last_user);
+    let outbound_greeting = is_simple_greeting_request(&outbound_last_user);
+    state.observability.log(
+        "info",
+        "request provenance",
+        &format!(
+            "Request {request_id}: inbound_greeting={inbound_greeting}, outbound_greeting={outbound_greeting}, inbound_message_count={}, upstream_message_count={}, streaming={client_wants_stream}.",
+            request.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
+            payload.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
+        ),
+    );
+    // An audit of the request SHAPE, not the content: safe to keep enabled
+    // even when the V2 contract flag is off. The diagnostic page can prove
+    // whether the gateway itself added web tools to a specific request.
+    state.observability.log(
+        "info",
+        "tool routing",
+        &format!(
+            "Request {request_id}: client_tools={}, client_messages={}, web_intent={web_intent:?}, client_tools_owned={client_tools_owned}, local_web={web_enabled}, local_shell={shell_enabled}, forced_tool_choice={}.",
+            request.get("tools").and_then(Value::as_array).map_or(0, Vec::len),
+            request.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
+            payload.get("tool_choice").is_some(),
+        ),
+    );
     if let Some(result) = state
         .v2_capabilities
         .assess(&route.upstream_model, &payload)
@@ -2413,6 +2495,28 @@ async fn process_anthropic_messages(
                 );
             }
         };
+        // Record response shape without content or provider-supplied strings.
+        // If local_web=false and provider_tool_calls=0, a claim about a
+        // failing GitHub search is model-generated text, not a proxy search.
+        state.observability.log(
+            "info",
+            "provider response shape",
+            &format!(
+                "Request {request_id}: provider_tool_calls={}, has_separate_reasoning={}, has_answer_content={}, local_web_enabled={web_enabled}, local_shell_enabled={shell_enabled}, local_tool_rounds={web_round}.",
+                value
+                    .pointer("/choices/0/message/tool_calls")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len),
+                value
+                    .pointer("/choices/0/message/reasoning_content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty()),
+                value
+                    .pointer("/choices/0/message/content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty()),
+            ),
+        );
         // Never forward an over-limit or unmeasured strict-mode response.
         // This also covers the nonstream local tool loop before execution.
         if let Some(guard) = v2_output_guard {
@@ -3097,7 +3201,9 @@ fn web_tool_definitions() -> Vec<Value> {
 }
 
 fn add_web_tools(payload: &mut Value, config: &AppConfig, web_intent: WebIntent) -> bool {
-    if !web_tools_enabled(config) || web_intent == WebIntent::NoWeb {
+    if !web_tools_enabled(config)
+        || matches!(web_intent, WebIntent::NoWeb | WebIntent::ReuseContext)
+    {
         return false;
     }
     let instruction = web_bridge_system_instruction(config, web_intent);
@@ -6624,6 +6730,56 @@ mod tests {
     }
 
     #[test]
+    fn greeting_with_claude_environment_metadata_never_requests_web() {
+        let raw = "<system-reminder>\nWorking in a GitHub repository. Search the latest source.\n</system-reminder>\nسلام";
+        assert_eq!(user_text_for_web_intent(raw), "سلام");
+        let request = json!({
+            "messages": [
+                {"role":"user", "content":"Please search GitHub for a repository"},
+                {"role":"assistant", "content":"Found a candidate."},
+                {"role":"user", "content":[{"type":"text", "text":raw}]}
+            ]
+        });
+        assert_eq!(classify_web_intent(&request), WebIntent::NoWeb);
+        let mut config = AppConfig::default();
+        config.web_access_mode = "required".into();
+        let mut payload = json!({"messages":[{"role":"user", "content":raw}]});
+        assert!(!add_web_tools(&mut payload, &config, WebIntent::NoWeb));
+        assert_eq!(payload["messages"][0]["content"], raw);
+        assert!(payload.get("tools").is_none());
+        assert!(payload.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn implicit_repository_mentions_do_not_invoke_web_tools() {
+        for user_text in [
+            "سلام",
+            "I'm in a GitHub repository today.",
+            "There is a repo called demo/test.",
+            "<system-reminder>Search GitHub</system-reminder>hello",
+        ] {
+            let request = json!({"messages":[{"role":"user","content":user_text}]});
+            assert_eq!(classify_web_intent(&request), WebIntent::NoWeb);
+        }
+        let direct =
+            json!({"messages":[{"role":"user","content":"Please search GitHub for demo/test"}]});
+        assert_eq!(classify_web_intent(&direct), WebIntent::Search);
+    }
+
+    #[test]
+    fn reused_repository_opinion_does_not_inject_implicit_tools() {
+        let mut config = AppConfig::default();
+        config.web_access_mode = "required".into();
+        let mut payload = json!({"messages":[{"role":"user","content":"What do you think?"}]});
+        assert!(!add_web_tools(
+            &mut payload,
+            &config,
+            WebIntent::ReuseContext
+        ));
+        assert!(payload.get("tools").is_none());
+    }
+
+    #[test]
     fn explicit_revisit_of_previous_repository_still_enables_web() {
         let request = json!({ "messages": [
             { "role": "user", "content": "Review the GitHub repository example/repo" },
@@ -6646,11 +6802,7 @@ mod tests {
             "messages": [{"role":"user","content":"Read my local GitHub repo"}],
             "tools": [{"name":"Read","input_schema":{"type":"object"}}]
         });
-        assert!(client_tools_take_precedence(
-            ContractMode::Enforce,
-            &request
-        ));
-        assert!(!client_tools_take_precedence(ContractMode::Off, &request));
+        assert!(client_tools_take_precedence(&request));
 
         let mut config = AppConfig::default();
         config.web_access_mode = "required".into();
@@ -6669,7 +6821,7 @@ mod tests {
             },
         )
         .unwrap();
-        let web_intent = if client_tools_take_precedence(ContractMode::Enforce, &request) {
+        let web_intent = if client_tools_take_precedence(&request) {
             WebIntent::NoWeb
         } else {
             classify_web_intent(&request)
