@@ -6279,7 +6279,9 @@ mod tests {
         assert_eq!(converted["messages"][1]["content"], "سلام");
         assert_eq!(converted["chat_template_kwargs"]["enable_thinking"], false);
         assert!(converted.get("reasoning_effort").is_none());
-        assert!(converted["chat_template_kwargs"].get("reasoning_effort").is_none());
+        assert!(converted["chat_template_kwargs"]
+            .get("reasoning_effort")
+            .is_none());
         assert!(converted.get("tools").is_none());
         assert!(converted.get("tool_choice").is_none());
     }
@@ -6301,10 +6303,14 @@ mod tests {
         route.thinking_mode = String::new();
         let unrelated = anthropic_to_openai(&client_request, &route).unwrap();
         assert_eq!(unrelated["chat_template_kwargs"]["enable_thinking"], false);
-        let plain = anthropic_to_openai(&json!({
-            "model":"claude-fable-5-1",
-            "messages":[{"role":"user","content":"hi"}]
-        }), &route).unwrap();
+        let plain = anthropic_to_openai(
+            &json!({
+                "model":"claude-fable-5-1",
+                "messages":[{"role":"user","content":"hi"}]
+            }),
+            &route,
+        )
+        .unwrap();
         assert!(plain.get("chat_template_kwargs").is_none());
     }
 

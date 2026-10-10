@@ -948,7 +948,9 @@ async fn qwen38_greeting_capture(Json(payload): Json<Value>) -> Json<Value> {
     assert_eq!(payload["model"], "qwen38");
     assert_eq!(payload["chat_template_kwargs"]["enable_thinking"], false);
     assert!(payload.get("reasoning_effort").is_none());
-    assert!(payload["chat_template_kwargs"].get("reasoning_effort").is_none());
+    assert!(payload["chat_template_kwargs"]
+        .get("reasoning_effort")
+        .is_none());
     let messages = payload["messages"].as_array().expect("messages forwarded");
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0]["role"], "system");
@@ -970,9 +972,12 @@ async fn real_http_qwen38_greeting_disables_thinking_without_injecting_web_conte
     let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let provider_port = provider.local_addr().unwrap().port();
     let upstream = tokio::spawn(async move {
-        axum::serve(provider,
-            Router::new().route("/v1/chat/completions", post(qwen38_greeting_capture)))
-            .await.unwrap();
+        axum::serve(
+            provider,
+            Router::new().route("/v1/chat/completions", post(qwen38_greeting_capture)),
+        )
+        .await
+        .unwrap();
     });
     let (state, dir) = test_server_state(provider_port, ContractMode::Enforce);
     {
@@ -985,9 +990,14 @@ async fn real_http_qwen38_greeting_disables_thinking_without_injecting_web_conte
     let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = gateway.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
-        axum::serve(gateway,
-            Router::new().route("/v1/messages", post(anthropic_messages)).with_state(state))
-            .await.unwrap();
+        axum::serve(
+            gateway,
+            Router::new()
+                .route("/v1/messages", post(anthropic_messages))
+                .with_state(state),
+        )
+        .await
+        .unwrap();
     });
     let reply = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{port}/v1/messages"))
@@ -1001,7 +1011,9 @@ async fn real_http_qwen38_greeting_disables_thinking_without_injecting_web_conte
             "output_config":{"effort":"high"},
             "messages":[{"role":"user","content":"سلام"}]
         }))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(reply.status(), reqwest::StatusCode::OK);
     let body: Value = reply.json().await.unwrap();
     assert_eq!(body["content"][0]["text"], "سلام!");
