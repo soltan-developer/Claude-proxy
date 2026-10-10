@@ -1087,6 +1087,27 @@ async fn fetch_models(state: TauriState<'_, BridgeState>) -> Result<Vec<String>,
     Ok(models)
 }
 
+// TCP connect measures DNS + TCP handshake, not the provider's model-list
+// processing time and not ICMP latency. Never goes through the Web Search VPN.
+async fn measure_direct_provider_tcp_ms(provider_url: &str) -> Option<u128> {
+    let url = Url::parse(provider_url).ok()?;
+    let host = url.host_str()?.to_owned();
+    let port = url.port_or_known_default()?;
+    let started = Instant::now();
+    match tokio::time::timeout(
+        Duration::from_secs(8),
+        tokio::net::TcpStream::connect((host.as_str(), port)),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => {
+            drop(stream);
+            Some(started.elapsed().as_millis())
+        }
+        _ => None,
+    }
+}
+
 #[tauri::command]
 async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, String> {
     let config = state.config.read().await.clone();
@@ -1094,20 +1115,32 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
         return Err("Enter a provider URL before checking its API.".into());
     }
     let url = upstream_url(&config.base_url, "models")?;
-    let mut request = state.client.get(url).timeout(Duration::from_secs(15));
+    let mut request = state.client.get(&url).timeout(Duration::from_secs(15));
     request = add_upstream_auth(request, &config)?;
-    let started = std::time::Instant::now();
-    let response =
-        send_provider_with_fallback(request, &state.direct_provider_client, &state.observability)
-            .await
-            .map_err(|error| {
-                state.observability.log(
-                    "error",
-                    "provider ping",
-                    "Provider API ping failed before receiving an HTTP response.",
-                );
-                format!("Could not reach the provider API: {error}")
-            })?;
+    let started = Instant::now();
+    // A VPN-only operator may explicitly request system proxy mode. In that
+    // case do not leak a separate direct TCP probe to the provider.
+    let direct_mode = ProviderProxyMode::from_setting(
+        &std::env::var("CLAUDE_PROXY_PROVIDER_PROXY_MODE").unwrap_or_default(),
+    ) == ProviderProxyMode::Direct;
+    let (tcp_ms, response) = tokio::join!(
+        async {
+            if direct_mode {
+                measure_direct_provider_tcp_ms(&url).await
+            } else {
+                None
+            }
+        },
+        send_provider_with_fallback(request, &state.direct_provider_client, &state.observability,)
+    );
+    let response = response.map_err(|error| {
+        state.observability.log(
+            "error",
+            "provider ping",
+            "Provider API ping failed before receiving an HTTP response.",
+        );
+        format!("Could not reach the provider API: {error}")
+    })?;
     let status = response.status();
     let elapsed = started.elapsed().as_millis();
     if !status.is_success() {
@@ -1121,15 +1154,114 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
             status.as_u16()
         ));
     }
+    let tcp_label = tcp_ms
+        .map(|ms| format!("{ms} ms (DNS + TCP connection)"))
+        .unwrap_or_else(|| "unavailable".to_string());
     state.observability.log(
         "info",
         "provider ping",
-        &format!("Provider API responded successfully in {elapsed} ms."),
+        &format!(
+            "Direct provider TCP connect: {tcp_label}; authenticated /v1/models response: {elapsed} ms."
+        ),
     );
     Ok(format!(
-        "Provider API responded in {elapsed} ms (HTTP {}).",
+        "Direct network TCP connect: {tcp_label}; API /v1/models response: {elapsed} ms (HTTP {}). These are not ICMP ping measurements.",
         status.as_u16()
     ))
+}
+
+fn isolated_provider_probe_payload(model: &str, prompt: &str) -> Value {
+    json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 512,
+        "stream": false
+    })
+}
+
+// An opt-in, minimal provider-only probe. Each question is independent:
+// no Claude Desktop history, tools, web search, system prompts or host actions.
+// Only fixed synthetic markers go to the selected default upstream model.
+#[tauri::command]
+async fn probe_provider_fidelity(state: TauriState<'_, BridgeState>) -> Result<Vec<Value>, String> {
+    let config = state.config.read().await.clone();
+    let route = config
+        .routes
+        .iter()
+        .find(|route| route.is_default)
+        .or_else(|| config.routes.first())
+        .ok_or_else(|| "Map at least one upstream model before running the probe.".to_string())?;
+    let endpoint = upstream_url(&config.base_url, "chat/completions")?;
+    let mut results = Vec::new();
+    for (language, marker, prompt) in [
+        (
+            "Persian",
+            "FA-527",
+            "فقط به فارسی پاسخ بده و در پایان FA-527 بنویس. هیچ جست‌وجویی انجام نده.",
+        ),
+        (
+            "Chinese",
+            "ZH-884",
+            "请只用中文回答，并在结尾写上 ZH-884。不要搜索。",
+        ),
+    ] {
+        let request = state
+            .client
+            .post(&endpoint)
+            .timeout(Duration::from_secs(45))
+            .json(&isolated_provider_probe_payload(
+                &route.upstream_model,
+                prompt,
+            ));
+        let request = add_upstream_auth(request, &config)?;
+        let started = Instant::now();
+        let response = send_provider_with_fallback(
+            request,
+            &state.direct_provider_client,
+            &state.observability,
+        )
+        .await
+        .map_err(|err| format!("Isolated model probe could not connect: {err}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!(
+                "Isolated model probe returned HTTP {}. Check the model route and provider API.",
+                status.as_u16()
+            ));
+        }
+        let payload: Value = response
+            .json()
+            .await
+            .map_err(|_| "The provider probe response is not valid JSON.".to_string())?;
+        let content = payload
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let tool_count = payload
+            .pointer("/choices/0/message/tool_calls")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let success = content.contains(marker) && tool_count == 0;
+        let reply_preview: String = content.chars().take(240).collect();
+        state.observability.log(
+            if success { "info" } else { "warning" },
+            "provider fidelity",
+            &format!(
+                "Isolated {language} model probe: marker_matched={success}, tool_calls={tool_count}, response_ms={}.",
+                started.elapsed().as_millis()
+            ),
+        );
+        results.push(json!({
+            "language": language,
+            "marker": marker,
+            "passed": success,
+            "model": route.upstream_model,
+            "responseMs": started.elapsed().as_millis(),
+            "toolCalls": tool_count,
+            "reply": reply_preview
+        }));
+    }
+    Ok(results)
 }
 
 async fn fetch_upstream_models(
@@ -2881,7 +3013,7 @@ fn build_web_client(config: &AppConfig) -> Result<Client, String> {
         .read_timeout(Duration::from_secs(45))
         .pool_idle_timeout(Duration::from_secs(30))
         .redirect(Policy::none())
-        .user_agent("Claude-Proxy-WebBridge/2.0.8");
+        .user_agent("Claude-Proxy-WebBridge/2.0.9");
     if config.web_proxy_mode == "manual" {
         let proxy_url = normalize_web_proxy_url(&config.web_proxy_url)?;
         if proxy_url.is_empty() {
@@ -5542,12 +5674,15 @@ impl ProviderProxyMode {
     fn from_setting(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
             "system" => Self::System,
-            "direct" => Self::Direct,
-            _ => Self::Auto,
+            "auto" => Self::Auto,
+            _ => Self::Direct,
         }
     }
 }
 
+// Provider requests are DIRECT by default. The separate Web Search proxy
+// is applied only in build_web_client and never leaks into provider traffic.
+// Advanced administrators may explicitly opt into system/auto via env var.
 // The user's system may retain HTTPS_PROXY pointing to a stopped local VPN.
 // Only retry failed connection establishment, never an HTTP error or a
 // possibly-sent request that timed out while waiting for a response.
@@ -5703,6 +5838,7 @@ pub fn run() {
             get_proxy_status,
             fetch_models,
             ping_provider,
+            probe_provider_fidelity,
             start_proxy,
             stop_proxy,
             test_local_route,

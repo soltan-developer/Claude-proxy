@@ -95,3 +95,20 @@ export async function openCreatorLink(): Promise<void> {
   if (isTauriRuntime()) await invoke("open_creator_link");
   else window.open("https://eitaa.com/salmanzadeh_ir", "_blank", "noopener,noreferrer");
 }
+
+// Fixed, synthetic prompts only. No user conversation content or Code workspace
+// is sent; results distinguish a direct provider response from proxy routing.
+export type ProviderProbeResult = {
+  language: string;
+  marker: string;
+  passed: boolean;
+  model: string;
+  responseMs: number;
+  toolCalls: number;
+  reply: string;
+};
+
+export async function probeProviderFidelity(): Promise<ProviderProbeResult[]> {
+  if (!isTauriRuntime()) throw new Error("The provider fidelity probe is available in the desktop app.");
+  return invoke<ProviderProbeResult[]>("probe_provider_fidelity");
+}
