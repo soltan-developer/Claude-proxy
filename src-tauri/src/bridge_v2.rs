@@ -2978,9 +2978,10 @@ fn trim_oldest_turn(payload: &mut Value) -> bool {
     // complete removable turn must contain an assistant reply before the
     // next user message. Otherwise we would delete essential instructions
     // while falsely logging "removed an older conversation turn".
-    if !messages[first_user + 1..next_user].iter().any(|message| {
-        message.get("role").and_then(Value::as_str) == Some("assistant")
-    }) {
+    if !messages[first_user + 1..next_user]
+        .iter()
+        .any(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+    {
         return false;
     }
     messages.drain(first_user..next_user);
