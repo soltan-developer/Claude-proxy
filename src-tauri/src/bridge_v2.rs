@@ -3091,8 +3091,7 @@ fn cowork_tool_content(content: &Value) -> Result<String, String> {
         }
         Value::Object(_) => Ok(content.to_string()),
         _ => Err(
-            "COWORK_TOOL_RESULT_CONTENT: native tool result contains unsupported content."
-                .into(),
+            "COWORK_TOOL_RESULT_CONTENT: native tool result contains unsupported content.".into(),
         ),
     }
 }
@@ -3107,9 +3106,10 @@ fn anthropic_to_openai(request: &Value, route: &ModelRoute) -> Result<Value, Str
     }
     if let Some(input_messages) = request.get("messages").and_then(Value::as_array) {
         for (index, message) in input_messages.iter().enumerate() {
-            let role = message.get("role").and_then(Value::as_str).ok_or_else(|| {
-                format!("COWORK_MISSING_MESSAGE_ROLE: message_index={index}.")
-            })?;
+            let role = message
+                .get("role")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("COWORK_MISSING_MESSAGE_ROLE: message_index={index}."))?;
             let content = message.get("content").unwrap_or(&Value::Null);
             match role {
                 "assistant" => {
@@ -6580,7 +6580,10 @@ mod tests {
             developer_output["messages"][0]["content"],
             "Keep the agent session isolated."
         );
-        assert!(user_text_order_preserved(&valid_developer, &developer_output));
+        assert!(user_text_order_preserved(
+            &valid_developer,
+            &developer_output
+        ));
 
         let invalid = json!({
             "model":"claude-fable-5-1",
