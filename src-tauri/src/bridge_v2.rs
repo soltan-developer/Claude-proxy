@@ -6219,8 +6219,12 @@ mod tests {
             "messages": [{ "role": "user", "content": "second" }]
         });
 
-        let high = anthropic_to_openai(&high_request, &fable_route()).unwrap();
-        let low = anthropic_to_openai(&low_request, &fable_route()).unwrap();
+        // Generic providers should continue to honor the client's
+        // per-request reasoning controls, unlike the Qwen38 override.
+        let mut generic_route = fable_route();
+        generic_route.upstream_model = "generic-provider".into();
+        let high = anthropic_to_openai(&high_request, &generic_route).unwrap();
+        let low = anthropic_to_openai(&low_request, &generic_route).unwrap();
 
         assert_eq!(high["reasoning_effort"], "high");
         assert_eq!(high["chat_template_kwargs"]["reasoning_effort"], "high");
@@ -6242,7 +6246,9 @@ mod tests {
             "messages": [{ "role": "user", "content": "hello" }]
         });
 
-        let converted = anthropic_to_openai(&request, &fable_route()).unwrap();
+        let mut generic_route = fable_route();
+        generic_route.upstream_model = "generic-provider".into();
+        let converted = anthropic_to_openai(&request, &generic_route).unwrap();
         assert_eq!(converted["reasoning_effort"], "medium");
         assert_eq!(converted["chat_template_kwargs"]["custom_flag"], true);
         assert_eq!(converted["chat_template_kwargs"]["enable_thinking"], true);
