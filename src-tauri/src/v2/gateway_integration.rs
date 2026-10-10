@@ -947,7 +947,11 @@ async fn real_http_client_read_is_not_hijacked_by_required_web_or_host_shell() {
 // overflow may silently erase that startup turn when native tools are present.
 async fn cowork_bootstrap_provider(Json(payload): Json<Value>) -> Json<Value> {
     let messages = payload["messages"].as_array().expect("forwarded messages");
-    assert_eq!(messages.len(), 2, "agent bootstrap and greeting must survive");
+    assert_eq!(
+        messages.len(),
+        2,
+        "agent bootstrap and greeting must survive"
+    );
     assert_eq!(messages[0]["content"], "Cowork workspace startup");
     assert_eq!(messages[1]["content"], "سلام");
     assert_eq!(payload["tools"][0]["function"]["name"], "Bash");

@@ -666,6 +666,19 @@ fn may_auto_trim_context(config: &AppConfig, client_tools_owned: bool) -> bool {
     config.auto_trim_on_context_overflow && !client_tools_owned
 }
 
+// When a Cowork/Code tool schema fills the configured context window, a
+// one-token response cap masquerades as successful generation and may start
+// pointless follow-up tool loops. Reject that estimate rather than sending
+// a silently crippled agent request.
+fn agent_output_budget_collapsed(request: &Value, payload: &Value, context_window: u64) -> bool {
+    context_window > 0
+        && request
+            .get("max_tokens")
+            .and_then(Value::as_u64)
+            .is_some_and(|requested| requested > 1)
+        && payload.get("max_tokens").and_then(Value::as_u64) == Some(1)
+}
+
 // Control-plane text sometimes travels inside a user content block (for
 // example Claude Code's <system-reminder> about the working directory).
 // It must be forwarded unmodified to the provider, but must NEVER authorize
@@ -2119,6 +2132,22 @@ async fn process_anthropic_messages(
     // They never guess from model names or silently degrade Code into chat.
     let client_tools_owned = client_tools_take_precedence(&request);
     let may_trim_context = may_auto_trim_context(&config, client_tools_owned);
+    if client_tools_owned
+        && agent_output_budget_collapsed(&request, &payload, route.context_window)
+    {
+        state.observability.log(
+            "warning",
+            "context",
+            &format!(
+                "Request {request_id}: native tool definitions exceed the configured agent response budget; refused an artificial one-token completion."
+            ),
+        );
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "COWORK_CONTEXT_TOO_LARGE: the configured model context cannot safely fit the Cowork/Claude Code tool schema and leave room for a response. Set the model route's verified context window to its actual provider limit or use an appropriately sized model. No client history was deleted.",
+        );
+    }
     let web_intent = if client_tools_owned {
         WebIntent::NoWeb
     } else {
@@ -2400,10 +2429,7 @@ async fn process_anthropic_messages(
             // trim budget here: a long conversation can hold far more turns
             // than a small cap, and stopping early while more turns were
             // still droppable turned long chats into dead ends.
-            if may_trim_context
-                && is_context_overflow(&message)
-                && trim_oldest_turn(&mut payload)
-            {
+            if may_trim_context && is_context_overflow(&message) && trim_oldest_turn(&mut payload) {
                 trimmed_turns += 1;
                 // Each dropped turn frees input room; hand the corresponding
                 // output budget back to the model (bounded by the client's
@@ -6518,6 +6544,30 @@ mod tests {
     }
 
     #[test]
+    fn cow_agent_one_token_budget_is_an_explicit_capacity_error() {
+        let mut route = fable_route();
+        route.context_window = 128;
+        let request = json!({
+            "model":"claude-fable-5-1",
+            "max_tokens": 1024,
+            "tools":[{"name":"Bash","description":"run a command",
+                      "input_schema":{"type":"object"}}],
+            "messages":[
+                {"role":"user","content":"Cowork agent bootstrap"},
+                {"role":"user","content":"سلام"}
+            ]
+        });
+        let converted = anthropic_to_openai(&request, &route).unwrap();
+        assert!(client_tools_take_precedence(&request));
+        assert!(agent_output_budget_collapsed(
+            &request,
+            &converted,
+            route.context_window
+        ));
+        assert!(!agent_output_budget_collapsed(&request, &converted, 0));
+    }
+
+    #[test]
     fn cowork_and_code_tool_context_is_never_proactively_trimmed() {
         let config = AppConfig::default();
         assert!(config.auto_trim_on_context_overflow);
@@ -6529,7 +6579,10 @@ mod tests {
             ]
         });
         assert!(client_tools_take_precedence(&agent_request));
-        assert!(!may_auto_trim_context(&config, client_tools_take_precedence(&agent_request)));
+        assert!(!may_auto_trim_context(
+            &config,
+            client_tools_take_precedence(&agent_request)
+        ));
         // A long tool definition should never justify erasing the bootstrap
         // turn before the provider has even evaluated the request.
         let mut payload = json!({"messages": [
