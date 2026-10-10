@@ -44,6 +44,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+      - name: Check Portable PowerShell script syntax
+        shell: pwsh
+        run: |
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path "scripts/build-portable.ps1").Path, [ref]$null, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -ne 0) { throw "Portable build script has PowerShell syntax errors." }
       - name: Validate local Code smoke script in dry-run (no credentials or provider calls)
         shell: pwsh
         run: ./scripts/verify-local-code.ps1

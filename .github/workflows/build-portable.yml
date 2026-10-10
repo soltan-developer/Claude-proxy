@@ -62,6 +62,13 @@ jobs:
           $version = node -p "require('./package.json').version"
           "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: Validate Portable PowerShell syntax
+        shell: pwsh
+        run: |
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path "scripts/build-portable.ps1").Path, [ref]$null, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -ne 0) { throw "Portable build script has PowerShell syntax errors." }
+
       - name: Build portable executable
         shell: pwsh
         run: pnpm build:portable
