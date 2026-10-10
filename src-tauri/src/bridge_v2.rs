@@ -2117,6 +2117,7 @@ async fn process_anthropic_messages(
                 state.observability.clone(),
                 upstream_permit,
                 state.next_upstream_client(),
+                state.direct_provider_client.clone(),
                 config.clone(),
                 target.to_string(),
                 continuation_payload,
@@ -2266,6 +2267,7 @@ async fn process_anthropic_messages(
                     );
                     let resumed = fetch_continuation(
                         &state.next_upstream_client(),
+                        &state.direct_provider_client,
                         &config,
                         &target_str,
                         next,
@@ -4136,6 +4138,7 @@ fn stream_openai_response(
     observability: ObservabilityStore,
     upstream_permit: OwnedSemaphorePermit,
     continuation_client: Client,
+    continuation_direct_client: Client,
     continuation_config: AppConfig,
     continuation_target: String,
     continuation_payload: Value,
@@ -4347,6 +4350,7 @@ fn stream_openai_response(
                 );
                 match fetch_continuation(
                     &continuation_client,
+                    &continuation_direct_client,
                     &continuation_config,
                     &continuation_target,
                     next,
@@ -4846,6 +4850,7 @@ fn provider_usage(value: &Value) -> (u64, u64) {
 /// continuing.
 async fn fetch_continuation(
     client: &Client,
+    direct: &Client,
     config: &AppConfig,
     target: &str,
     mut payload: Value,
@@ -4872,7 +4877,13 @@ async fn fetch_continuation(
                 return None;
             }
         };
-        let response = match request.json(&payload).send().await {
+        let response = match send_provider_with_fallback(
+            request.json(&payload),
+            direct,
+            observability,
+        )
+        .await
+        {
             Ok(response) => response,
             Err(error) => {
                 observability.log(
