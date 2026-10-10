@@ -1120,20 +1120,16 @@ async fn ping_provider(state: TauriState<'_, BridgeState>) -> Result<String, Str
     let started = Instant::now();
     let (tcp_ms, response) = tokio::join!(
         measure_direct_provider_tcp_ms(&url),
-        send_provider_with_fallback(
-            request,
-            &state.direct_provider_client,
-            &state.observability,
-        )
+        send_provider_with_fallback(request, &state.direct_provider_client, &state.observability,)
     );
     let response = response.map_err(|error| {
-                state.observability.log(
-                    "error",
-                    "provider ping",
-                    "Provider API ping failed before receiving an HTTP response.",
-                );
-                format!("Could not reach the provider API: {error}")
-            })?;
+        state.observability.log(
+            "error",
+            "provider ping",
+            "Provider API ping failed before receiving an HTTP response.",
+        );
+        format!("Could not reach the provider API: {error}")
+    })?;
     let status = response.status();
     let elapsed = started.elapsed().as_millis();
     if !status.is_success() {
@@ -1176,9 +1172,7 @@ fn isolated_provider_probe_payload(model: &str, prompt: &str) -> Value {
 // no Claude Desktop history, tools, web search, system prompts or host actions.
 // Only fixed synthetic markers go to the selected default upstream model.
 #[tauri::command]
-async fn probe_provider_fidelity(
-    state: TauriState<'_, BridgeState>,
-) -> Result<Vec<Value>, String> {
+async fn probe_provider_fidelity(state: TauriState<'_, BridgeState>) -> Result<Vec<Value>, String> {
     let config = state.config.read().await.clone();
     let route = config
         .routes
@@ -1189,14 +1183,25 @@ async fn probe_provider_fidelity(
     let endpoint = upstream_url(&config.base_url, "chat/completions")?;
     let mut results = Vec::new();
     for (language, marker, prompt) in [
-        ("Persian", "FA-527", "فقط به فارسی پاسخ بده و در پایان FA-527 بنویس. هیچ جست‌وجویی انجام نده."),
-        ("Chinese", "ZH-884", "请只用中文回答，并在结尾写上 ZH-884。不要搜索。"),
+        (
+            "Persian",
+            "FA-527",
+            "فقط به فارسی پاسخ بده و در پایان FA-527 بنویس. هیچ جست‌وجویی انجام نده.",
+        ),
+        (
+            "Chinese",
+            "ZH-884",
+            "请只用中文回答，并在结尾写上 ZH-884。不要搜索。",
+        ),
     ] {
         let request = state
             .direct_provider_client
             .post(&endpoint)
             .timeout(Duration::from_secs(45))
-.json(&isolated_provider_probe_payload(&route.upstream_model, prompt));
+            .json(&isolated_provider_probe_payload(
+                &route.upstream_model,
+                prompt,
+            ));
         let request = add_upstream_auth(request, &config)?;
         let started = Instant::now();
         let response = request
