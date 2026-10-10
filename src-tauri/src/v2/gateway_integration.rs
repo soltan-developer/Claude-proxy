@@ -966,7 +966,10 @@ async fn greeting_with_claude_environment_does_not_start_web_in_v2_off() {
     let upstream = tokio::spawn(async move {
         axum::serve(
             provider,
-            Router::new().route("/v1/chat/completions", post(greeting_with_environment_capture)),
+            Router::new().route(
+                "/v1/chat/completions",
+                post(greeting_with_environment_capture),
+            ),
         )
         .await
         .unwrap();
@@ -982,7 +985,9 @@ async fn greeting_with_claude_environment_does_not_start_web_in_v2_off() {
     let server = tokio::spawn(async move {
         axum::serve(
             gateway,
-            Router::new().route("/v1/messages", post(anthropic_messages)).with_state(state),
+            Router::new()
+                .route("/v1/messages", post(anthropic_messages))
+                .with_state(state),
         )
         .await
         .unwrap();
@@ -1032,7 +1037,9 @@ async fn client_tools_override_local_web_even_when_v2_flag_is_off() {
     let server = tokio::spawn(async move {
         axum::serve(
             gateway,
-            Router::new().route("/v1/messages", post(anthropic_messages)).with_state(state),
+            Router::new()
+                .route("/v1/messages", post(anthropic_messages))
+                .with_state(state),
         )
         .await
         .unwrap();
