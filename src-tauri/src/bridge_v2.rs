@@ -2973,6 +2973,16 @@ fn trim_oldest_turn(payload: &mut Value) -> bool {
     else {
         return false;
     };
+    // Cowork can send multiple setup/user messages before any model answer.
+    // That is NOT a complete historical turn and cannot be trimmed. A
+    // complete removable turn must contain an assistant reply before the
+    // next user message. Otherwise we would delete essential instructions
+    // while falsely logging "removed an older conversation turn".
+    if !messages[first_user + 1..next_user].iter().any(|message| {
+        message.get("role").and_then(Value::as_str) == Some("assistant")
+    }) {
+        return false;
+    }
     messages.drain(first_user..next_user);
     true
 }
@@ -6597,6 +6607,20 @@ mod tests {
         let mut disabled = config;
         disabled.auto_trim_on_context_overflow = false;
         assert!(!may_auto_trim_context(&disabled, false));
+    }
+
+    #[test]
+    fn two_user_messages_without_assistant_are_not_a_completed_turn() {
+        let mut payload = json!({"messages":[
+            {"role":"system","content":"Cowork system"},
+            {"role":"user","content":"Cowork workspace bootstrap"},
+            {"role":"user","content":"سلام"}
+        ]});
+        let before = payload.clone();
+        assert!(!trim_oldest_turn(&mut payload));
+        assert_eq!(payload, before);
+        assert_eq!(trim_to_context_budget(&mut payload, 1, 512), 0);
+        assert_eq!(payload, before);
     }
 
     #[test]
