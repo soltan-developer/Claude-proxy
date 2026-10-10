@@ -69,6 +69,10 @@ pub struct ModelRoute {
     pub display_name: String,
     pub upstream_model: String,
     pub tier: String,
+    /// Optional provider-specific thinking switch. Legacy route records use
+    /// an empty value, resolved according to the known upstream model.
+    #[serde(default)]
+    pub thinking_mode: String,
     #[serde(default)]
     pub context_window: u64,
     #[serde(default)]
@@ -847,6 +851,23 @@ fn route_metadata(route_id: &str) -> Option<(&'static str, &'static str)> {
         .map(|(_, title, tier)| (*title, *tier))
 }
 
+fn known_qwen38_model(model: &str) -> bool {
+    let name = model.trim().to_ascii_lowercase();
+    name == "qwen38" || name == "qwen38-sglang"
+}
+
+fn effective_thinking_mode(route: &ModelRoute) -> &'static str {
+    match route.thinking_mode.trim().to_ascii_lowercase().as_str() {
+        "disabled" => "disabled",
+        "enabled" => "enabled",
+        "inherit" => "inherit",
+        // Qwen38 provider's documented default is non-thinking for our route
+        // unless the operator explicitly opts in. Other models are unaffected.
+        _ if known_qwen38_model(&route.upstream_model) => "disabled",
+        _ => "inherit",
+    }
+}
+
 fn normalize_routes(routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
     let mut normalized = Vec::new();
     let mut seen_ids = HashSet::new();
@@ -863,6 +884,7 @@ fn normalize_routes(routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
         route.route_id = canonical_id.to_string();
         route.display_name = route.display_name.trim().to_string();
         route.upstream_model = route.upstream_model.trim().to_string();
+        route.thinking_mode = effective_thinking_mode(&route).into();
         if let Some((_, tier)) = route_metadata(canonical_id) {
             route.tier = tier.to_string();
         }
@@ -2919,7 +2941,7 @@ fn anthropic_to_openai(request: &Value, route: &ModelRoute) -> Result<Value, Str
             output[key] = value.clone();
         }
     }
-    apply_reasoning_controls(request, &mut output);
+    apply_reasoning_controls(request, &mut output, route);
     if let Some(stop) = request.get("stop_sequences").and_then(Value::as_array) {
         output["stop"] = Value::Array(stop.clone());
     }
@@ -2965,7 +2987,7 @@ fn anthropic_to_openai(request: &Value, route: &ModelRoute) -> Result<Value, Str
 /// extensions understood by Qwen/SGLang providers. Everything is derived from
 /// this request and written into its payload, so changing effort in one chat
 /// cannot mutate another chat or a global proxy setting.
-fn apply_reasoning_controls(request: &Value, output: &mut Value) {
+fn apply_reasoning_controls(request: &Value, output: &mut Value, route: &ModelRoute) {
     let effort = request
         .get("effort")
         .or_else(|| {
@@ -3010,6 +3032,23 @@ fn apply_reasoning_controls(request: &Value, output: &mut Value) {
             }
             _ => {}
         }
+    }
+
+    // The Anthropic client can ask for adaptive thinking while the selected
+    // Qwen provider explicitly requires a non-thinking chat template.
+    // Provider route policy wins; never send contradictory effort signals.
+    match effective_thinking_mode(route) {
+        "disabled" => {
+            chat_template_kwargs.remove("reasoning_effort");
+            chat_template_kwargs.insert("enable_thinking".into(), json!(false));
+            if let Some(object) = output.as_object_mut() {
+                object.remove("reasoning_effort");
+            }
+        }
+        "enabled" => {
+            chat_template_kwargs.insert("enable_thinking".into(), json!(true));
+        }
+        _ => {}
     }
 
     if !chat_template_kwargs.is_empty() {
@@ -6011,6 +6050,7 @@ mod tests {
             display_name: "Fable 5.1 · qwen38-sglang".into(),
             upstream_model: "qwen38-sglang".into(),
             tier: "fable".into(),
+            thinking_mode: String::new(),
             context_window: 200_000,
             max_output_tokens: 8_000,
             is_default: true,
@@ -6055,6 +6095,7 @@ mod tests {
                 display_name: "old fable".into(),
                 upstream_model: "provider-fable".into(),
                 tier: "fable".into(),
+                thinking_mode: String::new(),
                 context_window: 0,
                 max_output_tokens: 0,
                 is_default: true,
@@ -6064,6 +6105,7 @@ mod tests {
                 display_name: "old opus".into(),
                 upstream_model: "provider-opus".into(),
                 tier: "opus".into(),
+                thinking_mode: String::new(),
                 context_window: 0,
                 max_output_tokens: 0,
                 is_default: false,
@@ -6073,6 +6115,7 @@ mod tests {
                 display_name: "removed".into(),
                 upstream_model: "provider-mythos".into(),
                 tier: "mythos".into(),
+                thinking_mode: String::new(),
                 context_window: 0,
                 max_output_tokens: 0,
                 is_default: false,
@@ -6094,6 +6137,7 @@ mod tests {
                 display_name: "Shared label".into(),
                 upstream_model: "provider-opus".into(),
                 tier: "opus".into(),
+                thinking_mode: String::new(),
                 context_window: 0,
                 max_output_tokens: 0,
                 is_default: false,
@@ -6103,6 +6147,7 @@ mod tests {
                 display_name: "Shared label".into(),
                 upstream_model: "provider-sonnet".into(),
                 tier: "sonnet".into(),
+                thinking_mode: String::new(),
                 context_window: 0,
                 max_output_tokens: 0,
                 is_default: false,
@@ -6122,6 +6167,7 @@ mod tests {
                 display_name: "Opus 5.5".into(),
                 upstream_model: "provider-opus".into(),
                 tier: "opus".into(),
+                thinking_mode: String::new(),
                 context_window: 0,
                 max_output_tokens: 0,
                 is_default: false,
@@ -6200,6 +6246,60 @@ mod tests {
         assert_eq!(converted["reasoning_effort"], "medium");
         assert_eq!(converted["chat_template_kwargs"]["custom_flag"], true);
         assert_eq!(converted["chat_template_kwargs"]["enable_thinking"], true);
+    }
+
+    #[test]
+    fn qwen38_legacy_route_defaults_to_no_thinking_and_keeps_farsi_greeting() {
+        let legacy = json!({
+            "routeId": "claude-fable-5-1", "displayName": "Qwen38",
+            "upstreamModel": "qwen38", "tier": "fable",
+            "contextWindow": 128000, "maxOutputTokens": 4096,
+            "isDefault": true
+        });
+        let route: ModelRoute = serde_json::from_value(legacy).unwrap();
+        assert_eq!(effective_thinking_mode(&route), "disabled");
+        let request = json!({
+            "model": "claude-fable-5-1",
+            "system": [{"type":"text","text":"You are an assistant."}],
+            "thinking": {"type":"adaptive"},
+            "output_config": {"effort":"high"},
+            "messages": [{"role":"user", "content":"سلام"}],
+            "max_tokens": 200, "stream": false
+        });
+        let converted = anthropic_to_openai(&request, &route).unwrap();
+        assert_eq!(converted["model"], "qwen38");
+        assert_eq!(converted["messages"][0]["content"], "You are an assistant.");
+        assert_eq!(converted["messages"][1]["role"], "user");
+        assert_eq!(converted["messages"][1]["content"], "سلام");
+        assert_eq!(converted["chat_template_kwargs"]["enable_thinking"], false);
+        assert!(converted.get("reasoning_effort").is_none());
+        assert!(converted["chat_template_kwargs"].get("reasoning_effort").is_none());
+        assert!(converted.get("tools").is_none());
+        assert!(converted.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn qwen38_explicit_enable_and_other_models_are_independent() {
+        let mut route = fable_route();
+        route.thinking_mode = "enabled".into();
+        let client_request = json!({
+            "model": "claude-fable-5-1", "thinking": {"type": "disabled"},
+            "messages": [{"role":"user", "content":"سلام"}]
+        });
+        let enabled = anthropic_to_openai(&client_request, &route).unwrap();
+        assert_eq!(enabled["chat_template_kwargs"]["enable_thinking"], true);
+        route.thinking_mode = "disabled".into();
+        let disabled = anthropic_to_openai(&client_request, &route).unwrap();
+        assert_eq!(disabled["chat_template_kwargs"]["enable_thinking"], false);
+        route.upstream_model = "unrelated-model".into();
+        route.thinking_mode = String::new();
+        let unrelated = anthropic_to_openai(&client_request, &route).unwrap();
+        assert_eq!(unrelated["chat_template_kwargs"]["enable_thinking"], false);
+        let plain = anthropic_to_openai(&json!({
+            "model":"claude-fable-5-1",
+            "messages":[{"role":"user","content":"hi"}]
+        }), &route).unwrap();
+        assert!(plain.get("chat_template_kwargs").is_none());
     }
 
     #[test]
@@ -6550,6 +6650,7 @@ mod tests {
                 display_name: "Test".into(),
                 upstream_model: "mock-upstream".into(),
                 tier: "sonnet".into(),
+                thinking_mode: String::new(),
                 context_window: 128_000,
                 max_output_tokens: 4_096,
                 is_default: true,
