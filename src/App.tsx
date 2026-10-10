@@ -580,7 +580,7 @@ function ConnectionPage({ language, draft, setDraft, secret, setSecret, clearSec
         <div className="button-row connection-actions">
           <button className="button button-secondary" disabled={!isTauri || Boolean(busy)} onClick={onProbe}>{busy === "probe" ? "Testing model…" : "Test upstream model instructions (2 requests)"}</button>
         </div>
-        <p className="field-hint">This optional test sends two small, synthetic prompts directly to the mapped default upstream model. It uses no chat history, local tools or Web Search; provider usage fees may apply.</p>
+        <p className="field-hint">This optional test sends two small, synthetic prompts to the mapped default upstream model using the provider network policy (direct by default). It uses no chat history, local tools or Web Search; provider usage fees may apply.</p>
         {probeResults.length > 0 && <section className="card form-card" aria-label="Isolated provider fidelity results">
           <h3>Isolated upstream model results</h3>
           {probeResults.map((result) => <div key={result.marker} className="field-hint">
