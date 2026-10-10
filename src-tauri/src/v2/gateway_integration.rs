@@ -941,6 +941,74 @@ async fn real_http_client_read_is_not_hijacked_by_required_web_or_host_shell() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+// This HTTP test proves payload fidelity, not the live Qwen model's language
+// quality. It captures the exact translated request on a mock upstream.
+async fn qwen38_greeting_capture(Json(payload): Json<Value>) -> Json<Value> {
+    assert_eq!(payload["model"], "qwen38");
+    assert_eq!(payload["chat_template_kwargs"]["enable_thinking"], false);
+    assert!(payload.get("reasoning_effort").is_none());
+    assert!(payload["chat_template_kwargs"].get("reasoning_effort").is_none());
+    let messages = payload["messages"].as_array().expect("messages forwarded");
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[0]["content"], "You are a helpful assistant.");
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[1]["content"], "سلام");
+    assert!(payload.get("tools").is_none());
+    assert!(payload.get("tool_choice").is_none());
+    Json(json!({
+        "id":"mock-greeting",
+        "model":"qwen38",
+        "choices":[{"finish_reason":"stop", "message":{"role":"assistant", "content":"سلام!"}}],
+        "usage":{"prompt_tokens":20,"completion_tokens":3}
+    }))
+}
+
+#[tokio::test]
+async fn real_http_qwen38_greeting_disables_thinking_without_injecting_web_context() {
+    let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider_port = provider.local_addr().unwrap().port();
+    let upstream = tokio::spawn(async move {
+        axum::serve(provider,
+            Router::new().route("/v1/chat/completions", post(qwen38_greeting_capture)))
+            .await.unwrap();
+    });
+    let (state, dir) = test_server_state(provider_port, ContractMode::Enforce);
+    {
+        let mut config = state.config.write().await;
+        config.web_access_mode = "required".into();
+        config.shell_access_mode = "disabled".into();
+        config.routes[0].upstream_model = "qwen38".into();
+        config.routes[0].thinking_mode = String::new(); // Old stored route.
+    }
+    let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = gateway.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(gateway,
+            Router::new().route("/v1/messages", post(anthropic_messages)).with_state(state))
+            .await.unwrap();
+    });
+    let reply = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .bearer_auth("test-gateway-token")
+        .json(&json!({
+            "model":"claude-sonnet-5-5",
+            "stream":false,
+            "max_tokens":256,
+            "system":[{"type":"text","text":"You are a helpful assistant."}],
+            "thinking":{"type":"adaptive"},
+            "output_config":{"effort":"high"},
+            "messages":[{"role":"user","content":"سلام"}]
+        }))
+        .send().await.unwrap();
+    assert_eq!(reply.status(), reqwest::StatusCode::OK);
+    let body: Value = reply.json().await.unwrap();
+    assert_eq!(body["content"][0]["text"], "سلام!");
+    server.abort();
+    upstream.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 async fn provider_attempts_disabled_shell(Json(payload): Json<Value>) -> Json<Value> {
     let tools = payload["tools"].as_array().expect("web tools enabled");
     assert!(tools
