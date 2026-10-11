@@ -830,7 +830,9 @@ fn load_config(path: &Path) -> AppConfig {
             .unwrap_or_else(|_| DEFAULT_WEB_SEARCH_URL.into()),
         web_preferred_domains: normalize_web_preferred_domains(disk.web_preferred_domains),
         client_web_grounding_enabled: disk.client_web_grounding_enabled,
-        client_web_allowed_domains: normalize_web_preferred_domains(disk.client_web_allowed_domains),
+        client_web_allowed_domains: normalize_web_preferred_domains(
+            disk.client_web_allowed_domains,
+        ),
         shell_access_mode: normalize_shell_access_mode(&disk.shell_access_mode).into(),
     }
 }
@@ -2544,8 +2546,16 @@ async fn process_anthropic_messages(
                 "client web grounding",
                 &format!(
                     "Request {request_id}: {}, {} ({} ms); client-owned tools preserved.",
-                    if matches!(plan, ClientGrounding::Fetch(_)) { "fetch" } else { "search" },
-                    if success { "verified" } else { "unavailable or disallowed" },
+                    if matches!(plan, ClientGrounding::Fetch(_)) {
+                        "fetch"
+                    } else {
+                        "search"
+                    },
+                    if success {
+                        "verified"
+                    } else {
+                        "unavailable or disallowed"
+                    },
                     started.elapsed().as_millis(),
                 ),
             );
@@ -3748,7 +3758,9 @@ fn apply_reasoning_controls(request: &Value, output: &mut Value, route: &ModelRo
 // tool or an excuse to ignore an administrator's egress restrictions.
 fn web_host_allowed(url: &Url, approved_hosts: &[String]) -> bool {
     url.host_str().is_some_and(|host| {
-        approved_hosts.iter().any(|allowed| host.eq_ignore_ascii_case(allowed))
+        approved_hosts
+            .iter()
+            .any(|allowed| host.eq_ignore_ascii_case(allowed))
     })
 }
 
@@ -3777,7 +3789,9 @@ fn explicit_public_url(text: &str) -> Option<Url> {
                 .split_whitespace()
                 .next()
                 .unwrap_or_default()
-                .trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | '!' | '?' | ')' | ']' | '}'));
+                .trim_end_matches(|c: char| {
+                    matches!(c, '.' | ',' | ';' | '!' | '?' | ')' | ']' | '}')
+                });
             validate_web_url(url).ok()
         })
     })
@@ -3790,21 +3804,32 @@ enum ClientGrounding {
 }
 
 fn native_web_was_blocked(request: &Value) -> bool {
-    request.get("messages").and_then(Value::as_array).is_some_and(|messages| {
-        messages.iter().any(|message| {
-            let role_is_tool = message.get("role").and_then(Value::as_str) == Some("tool");
-            let embedded_tool = message.get("content").and_then(Value::as_array)
-                .is_some_and(|blocks| blocks.iter().any(|block| {
-                    block.get("type").and_then(Value::as_str) == Some("tool_result")
-                }));
-            if !role_is_tool && !embedded_tool {
-                return false;
-            }
-            let serialized = message.get("content").unwrap_or(&Value::Null).to_string().to_ascii_lowercase();
-            serialized.contains("network settings block")
-                || (serialized.contains("organization") && serialized.contains("blocked"))
+    request
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                let role_is_tool = message.get("role").and_then(Value::as_str) == Some("tool");
+                let embedded_tool = message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|blocks| {
+                        blocks.iter().any(|block| {
+                            block.get("type").and_then(Value::as_str) == Some("tool_result")
+                        })
+                    });
+                if !role_is_tool && !embedded_tool {
+                    return false;
+                }
+                let serialized = message
+                    .get("content")
+                    .unwrap_or(&Value::Null)
+                    .to_string()
+                    .to_ascii_lowercase();
+                serialized.contains("network settings block")
+                    || (serialized.contains("organization") && serialized.contains("blocked"))
+            })
         })
-    })
 }
 
 fn plan_client_web_grounding(
@@ -3870,10 +3895,17 @@ async fn collect_client_web_evidence(config: &AppConfig, task: &ClientGrounding)
                 config,
                 &json!({"url": url.as_str(), "max_chars": 4500}),
                 Some(&config.client_web_allowed_domains),
-            ).await;
+            )
+            .await;
             let parsed = serde_json::from_str::<Value>(&result).unwrap_or(Value::Null);
-            if parsed.get("error").is_some() || parsed.get("content").and_then(Value::as_str).is_none() {
-                (false, "Page retrieval failed or was denied. No verified page content is available.".into())
+            if parsed.get("error").is_some()
+                || parsed.get("content").and_then(Value::as_str).is_none()
+            {
+                (
+                    false,
+                    "Page retrieval failed or was denied. No verified page content is available."
+                        .into(),
+                )
             } else {
                 (true, result)
             }
@@ -3881,19 +3913,32 @@ async fn collect_client_web_evidence(config: &AppConfig, task: &ClientGrounding)
         ClientGrounding::Search(query) => {
             let result = web_search(config, &json!({"query": query})).await;
             let parsed = serde_json::from_str::<Value>(&result).unwrap_or(Value::Null);
-            let filtered = parsed.get("results").and_then(Value::as_array)
-                .into_iter().flatten()
-                .filter(|entry| entry.get("url").and_then(Value::as_str)
-                    .and_then(|raw| validate_web_url(raw).ok())
-                    .is_some_and(|url| web_host_allowed(&url, &config.client_web_allowed_domains)))
+            let filtered = parsed
+                .get("results")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .and_then(|raw| validate_web_url(raw).ok())
+                        .is_some_and(|url| {
+                            web_host_allowed(&url, &config.client_web_allowed_domains)
+                        })
+                })
                 .take(4)
                 .cloned()
                 .collect::<Vec<Value>>();
             if filtered.is_empty() {
                 (false, "Search failed or returned no sources from the explicitly approved hostnames. Do not invent results.".into())
             } else {
-                (true, json!({"results": filtered,
-                    "retrieved_at_unix": parsed.get("retrieved_at_unix")}).to_string())
+                (
+                    true,
+                    json!({"results": filtered,
+                    "retrieved_at_unix": parsed.get("retrieved_at_unix")})
+                    .to_string(),
+                )
             }
         }
     }
@@ -4138,7 +4183,9 @@ async fn web_get_scoped(
         validate_web_url(url.as_str())?;
         if let Some(hosts) = approved_hosts {
             if !web_host_allowed(&url, hosts) {
-                return Err("The web destination is not in the explicitly approved hostname list.".into());
+                return Err(
+                    "The web destination is not in the explicitly approved hostname list.".into(),
+                );
             }
         }
         validate_resolved_web_host(&url).await?;
@@ -7347,10 +7394,16 @@ mod tests {
             plan_client_web_grounding(&request, &config, true),
             Some(ClientGrounding::Fetch(_))
         ));
-        insert_untrusted_web_evidence(&mut converted, r#"{"source_url":"https://docs.example.org/help","content":"source"}"#);
+        insert_untrusted_web_evidence(
+            &mut converted,
+            r#"{"source_url":"https://docs.example.org/help","content":"source"}"#,
+        );
         assert_eq!(converted["tools"], original_tools);
         assert!(user_text_order_preserved(&request, &converted));
-        assert!(converted["messages"][0]["content"].as_str().unwrap().contains("untrusted_web_evidence"));
+        assert!(converted["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("untrusted_web_evidence"));
         assert!(plan_client_web_grounding(&request, &config, false).is_none());
     }
 
@@ -7363,9 +7416,18 @@ mod tests {
         let approved = Url::parse("https://docs.example.org/readme").unwrap();
         let sibling = Url::parse("https://evil-docs.example.org/readme").unwrap();
         let local = Url::parse("http://127.0.0.1/internal").unwrap();
-        assert!(web_host_allowed(&approved, &config.client_web_allowed_domains));
-        assert!(!web_host_allowed(&sibling, &config.client_web_allowed_domains));
-        assert!(!web_host_allowed(&local, &config.client_web_allowed_domains));
+        assert!(web_host_allowed(
+            &approved,
+            &config.client_web_allowed_domains
+        ));
+        assert!(!web_host_allowed(
+            &sibling,
+            &config.client_web_allowed_domains
+        ));
+        assert!(!web_host_allowed(
+            &local,
+            &config.client_web_allowed_domains
+        ));
         let denied = json!({
             "messages":[
                 {"role":"tool","tool_call_id":"web-1","content":"Your organization's network settings block this website."},
@@ -7396,7 +7458,8 @@ mod tests {
         let mut config = AppConfig::default();
         config.web_access_mode = "auto".into();
         config.client_web_allowed_domains = vec!["docs.example.org".into()];
-        let blocked = ClientGrounding::Fetch(Url::parse("https://blocked.example.com/info").unwrap());
+        let blocked =
+            ClientGrounding::Fetch(Url::parse("https://blocked.example.com/info").unwrap());
         let (success, text) = collect_client_web_evidence(&config, &blocked).await;
         assert!(!success);
         assert!(text.contains("not explicitly authorized"));
