@@ -16,6 +16,7 @@ on:
       - v2/2.0.12-real-web-capability-diagnostics
       - v2/2.0.13-local-mcp-web-tools
       - v2/2.0.14-cowork-mcpb-grounded-web
+      - v2/2.0.15-api-web-grounding
       - v2/2.0.9-tool-fidelity-regressions
   workflow_dispatch:
 
