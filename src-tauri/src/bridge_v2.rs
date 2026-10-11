@@ -3847,16 +3847,20 @@ fn plan_client_web_grounding(
     }
     // A tool-result follow-up is not a new human request. Never re-fetch
     // the prior user's URL on each native Cowork tool cycle.
-    let last_is_human = request.get("messages")
+    let last_is_human = request
+        .get("messages")
         .and_then(Value::as_array)
         .and_then(|messages| messages.last())
         .is_some_and(|last| {
             last.get("role").and_then(Value::as_str) == Some("user")
-                && !last.get("content").and_then(Value::as_array).is_some_and(|blocks| {
-                    blocks.iter().any(|block| {
-                        block.get("type").and_then(Value::as_str) == Some("tool_result")
+                && !last
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|blocks| {
+                        blocks.iter().any(|block| {
+                            block.get("type").and_then(Value::as_str) == Some("tool_result")
+                        })
                     })
-                })
         });
     if !last_is_human {
         return None;
