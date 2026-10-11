@@ -1,4 +1,4 @@
-# Claude Proxy 2.0.14
+# Claude Proxy 2.0.15
 
 Claude Proxy is a Windows desktop app that connects Claude Desktop and Claude CLI directly to OpenAI-compatible model providers. Provider credentials, URLs, and model routes start empty on a fresh install.
 
@@ -50,3 +50,11 @@ Developer: Salmanzadeh — [Eitaa channel](https://eitaa.com/salmanzadeh_ir)
 ## Optional Cowork local MCP bundle (v2.0.14)
 
 A separate, **manual-install** MCPB extension can expose the existing read-only web_search/web_fetch tools to **compatible authorized local Cowork sessions**. It is not installed or enabled by Claude Proxy and does not alter any Claude network policy. Cloud Cowork sessions cannot run a local MCP server; native Cowork Web Search/Fetch remains independent of Claude Code and Proxy. Domain restrictions and organization policies must be honored. For setup, security notes, and honest failure conditions see [the Cowork MCPB guide](cowork-mcpb/README.md). The private Windows CI build produces a distinct `Claude-Proxy-v2.0.14-Cowork-Web.mcpb` artifact; a successful offline build is **not** proof of live Cowork integration.
+
+## v2.0.15 — optional API-side web grounding for native-tool clients
+
+When Cowork/Claude Code sends native tool schemas, the gateway must preserve them. The new **disabled-by-default** Advanced setting **Ground explicit web requests for API-based Cowork/Code sessions** makes one conservative independent search/fetch pass for an explicit URL or search phrase, using the existing configured Web Bridge, and prepends a clearly marked **untrusted source data** system message to Qwen before calling the model API. This does not replace native web tools, modify Claude/organization permission policies, or guarantee that a proprietary Cowork client will choose to use the evidence.
+
+**Explicit approval required**: Web access must be enabled, and the user must list exact authorized public hostnames separately from preferred search domains. Each web redirect is checked against the approved hostnames and existing SSRF checks. Search snippets from other domains are omitted. Current/previous native tool-denial messages disable automatic gateway grounding; requests blocked by client or administrator policy must not be rerouted. The gateway never auto-edits Claude settings to enable this feature. No user API credentials or prompts are stored in diagnostics.
+
+**Acceptance**: the app must pass Rust, frontend, version and Windows Portable CI. Real Qwen + Cowork streaming/tool cycles must still be tested on the user's machine. Mock CI tests are not proof that a blocked native web tool now works. See PR #32 (or the v2.0.15 Draft PR) for results.

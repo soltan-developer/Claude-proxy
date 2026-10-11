@@ -33,6 +33,8 @@ export type BridgeConfig = {
   webProxyUrl: string;
   webSearchUrl: string;
   webPreferredDomains: string[];
+  clientWebGroundingEnabled: boolean;
+  clientWebAllowedDomains: string[];
 };
 
 export type ConfigInput = Omit<BridgeConfig, "apiKeyConfigured"> & {
@@ -97,6 +99,8 @@ export const emptyConfig: BridgeConfig = {
   webProxyUrl: "",
   webSearchUrl: "https://html.duckduckgo.com/html/",
   webPreferredDomains: ["github.com", "raw.githubusercontent.com", "api.github.com"],
+  clientWebGroundingEnabled: false,
+  clientWebAllowedDomains: [],
 };
 
 export const routeRoles = [
