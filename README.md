@@ -1,4 +1,4 @@
-# Claude Proxy 2.0.16
+# Claude Proxy 2.0.17
 
 Claude Proxy is a Windows desktop app that connects Claude Desktop and Claude CLI directly to OpenAI-compatible model providers. Provider credentials, URLs, and model routes start empty on a fresh install.
 
@@ -66,3 +66,10 @@ When Cowork/Claude Code sends native tool schemas, the gateway must preserve the
 - When Cowork owns native tools, the gateway records a privacy-safe grounding *skip reason* (opt-in-disabled, native-tool-followup, client-forced-native-tool, native-egress-denial, no-explicit-web-intent etc.). A native Cowork network block remains enforceable and is not bypassed.
 - Provider HTTP 400 logs include only categorized hints (tool-choice, message-format, tool-call-history, tool-schema, context/token, stream-options or unknown), counts and model route. Provider error bodies, secrets, prompts and tool outputs are **not stored**.
 - Real provider/Windows Cowork acceptance remains necessary; passing CI tests does not imply that native Cowork web tools are unlocked. PR is Draft; no Merge/Release.
+
+## v2.0.17 — single web-domain list, visible source integrity
+
+- The Web settings UI displays **one** editable approved-host list, rather than requiring duplicate input in a source-hint list and a web-grounding allowlist. It keeps existing `webPreferredDomains` legacy settings on disk for backward compatibility, without silently promoting suggestions to egress approval. When API grounding is enabled, the approved host list also informs model source hints; otherwise legacy hints remain unchanged.
+- The UI invalidates stale connection-test indicators when route or host settings change and blocks save if grounding is enabled with an empty allowlist. The green test checks only **Claude Proxy** web connectivity, **not** native Cowork web egress.
+- When the incoming request includes a native Cowork `cowork-egress-blocked` denial, add a narrow source-integrity notice to the provider context: don't claim the native tool fetched GitHub; distinguish verified source content from search snippets, and don't fabricate repository stars/commits/licenses. Existing client tool definitions and control messages remain preserved.
+- No Claude Desktop/Cowork settings or `coworkEgressAllowedHosts` network permissions are changed. An authorized native Cowork web fetch still needs a client-side permission decision; this gateway cannot grant it. Config defaults are not changed. Keep this PR Draft until actual Windows/Qwen/Cowork acceptance.
