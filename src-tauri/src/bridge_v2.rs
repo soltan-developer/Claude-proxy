@@ -2528,6 +2528,34 @@ async fn process_anthropic_messages(
             "COWORK_CONTEXT_TOO_LARGE: the configured model context cannot safely fit the Cowork/Claude Code tool schema and leave room for a response. Set the model route's verified context window to its actual provider limit or use an appropriately sized model. No client history was deleted.",
         );
     }
+    // An explicit user opt-in may provide cited source data to Qwen before
+    // the provider call. Client-owned tool definitions and IDs remain intact.
+    // No native tool call is intercepted or rerouted.
+    let grounding_plan = plan_client_web_grounding(&request, &config, client_tools_owned);
+    let mut client_grounding_succeeded = false;
+    if let Some(plan) = grounding_plan.as_ref() {
+        let started = Instant::now();
+        if let Ok(_permit) = state.web_slots.clone().acquire_owned().await {
+            let (success, evidence) = collect_client_web_evidence(&config, plan).await;
+            client_grounding_succeeded = success;
+            insert_untrusted_web_evidence(&mut payload, &evidence);
+            state.observability.log(
+                if success { "info" } else { "warning" },
+                "client web grounding",
+                &format!(
+                    "Request {request_id}: {}, {} ({} ms); client-owned tools preserved.",
+                    if matches!(plan, ClientGrounding::Fetch(_)) { "fetch" } else { "search" },
+                    if success { "verified" } else { "unavailable or disallowed" },
+                    started.elapsed().as_millis(),
+                ),
+            );
+        } else {
+            insert_untrusted_web_evidence(
+                &mut payload,
+                "Web grounding capacity unavailable; no source was retrieved.",
+            );
+        }
+    }
     let web_intent = if client_tools_owned {
         WebIntent::NoWeb
     } else {
@@ -2600,9 +2628,10 @@ async fn process_anthropic_messages(
         "info",
         "tool routing",
         &format!(
-            "Request {request_id}: client_tools={}, client_messages={}, web_intent={web_intent:?}, client_tools_owned={client_tools_owned}, local_web={web_enabled}, local_shell={shell_enabled}, forced_tool_choice={}.",
+            "Request {request_id}: client_tools={}, client_messages={}, web_intent={web_intent:?}, client_tools_owned={client_tools_owned}, local_web={web_enabled}, client_grounding_enabled={}, client_grounding_succeeded={client_grounding_succeeded}, local_shell={shell_enabled}, forced_tool_choice={}.",
             request.get("tools").and_then(Value::as_array).map_or(0, Vec::len),
             request.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
+            config.client_web_grounding_enabled,
             payload.get("tool_choice").is_some(),
         ),
     );
