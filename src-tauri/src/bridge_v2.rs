@@ -7476,6 +7476,84 @@ mod tests {
     }
 
     #[test]
+    fn grounding_explains_skips_without_request_content_or_bypassing_native_denials() {
+        let mut config = AppConfig::default();
+        config.web_access_mode = "auto".into();
+        config.client_web_grounding_enabled = true;
+        config.client_web_allowed_domains = vec!["docs.example.org".into()];
+        let base = json!({
+            "tools": [{"name": "web_fetch"}],
+            "messages": [{"role": "user", "content": "https://docs.example.org/guide"}]
+        });
+        assert_eq!(client_grounding_skip_reason(&base, &config, true), None);
+        let mut forced = base.clone();
+        forced["tool_choice"] = json!({"type": "tool", "name": "web_fetch"});
+        assert_eq!(
+            client_grounding_skip_reason(&forced, &config, true),
+            Some("client-forced-native-tool")
+        );
+        let denied = json!({
+            "tools": [{"name": "web_fetch"}],
+            "messages": [
+                {"role": "tool", "tool_call_id": "ref-1", "content": "Host blocked by organization network settings"},
+                {"role": "user", "content": "https://docs.example.org/guide"}
+            ]
+        });
+        assert_eq!(
+            client_grounding_skip_reason(&denied, &config, true),
+            Some("native-egress-denial")
+        );
+        config.client_web_grounding_enabled = false;
+        assert_eq!(
+            client_grounding_skip_reason(&base, &config, true),
+            Some("opt-in-disabled")
+        );
+    }
+
+    #[test]
+    fn web_evidence_merges_into_existing_system_without_rewriting_client_tools() {
+        let mut payload = json!({
+            "messages": [
+                {"role":"system","content":"Existing agent instructions"},
+                {"role":"user","content":"An authorized web question"}
+            ],
+            "tools":[{"type":"function","function":{"name":"List"}}],
+            "tool_choice":"auto"
+        });
+        let original_tools = payload["tools"].clone();
+        insert_untrusted_web_evidence(
+            &mut payload,
+            r#"{"source_url":"https://docs.example.org/guide","content":"verified page"}"#,
+        );
+        assert_eq!(payload["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["tools"], original_tools);
+        assert_eq!(payload["tool_choice"], "auto");
+        let system = payload["messages"][0]["content"].as_str().unwrap();
+        assert!(system.starts_with("Existing agent instructions"));
+        assert!(system.contains("untrusted_web_evidence"));
+    }
+
+    #[test]
+    fn provider_400_classification_is_private_and_never_echoes_error_payloads() {
+        assert_eq!(
+            safe_provider_failure_category("unsupported tool_choice, secret=example"),
+            "tool-choice"
+        );
+        assert_eq!(
+            safe_provider_failure_category("tool_calls mismatch"),
+            "tool-call-history"
+        );
+        assert_eq!(
+            safe_provider_failure_category("invalid role in messages"),
+            "message-format"
+        );
+        assert_eq!(
+            safe_provider_failure_category("Unexpected response"),
+            "unknown-provider-error"
+        );
+    }
+
+    #[test]
     fn client_web_grounding_is_explicit_and_preserves_native_38_tool_schema() {
         let mut config = AppConfig::default();
         config.web_access_mode = "auto".into();
