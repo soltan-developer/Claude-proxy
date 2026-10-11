@@ -3973,7 +3973,10 @@ fn insert_native_egress_denial_notice(payload: &mut Value) {
             message.get("role").and_then(Value::as_str) == Some("system")
                 && message.get("content").and_then(Value::as_str).is_some()
         }) {
-            let previous = system.get("content").and_then(Value::as_str).unwrap_or_default();
+            let previous = system
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             system["content"] = json!(format!("{previous}\n\n{notice}"));
         } else {
             messages.insert(0, json!({"role": "system", "content": notice}));
