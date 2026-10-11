@@ -3860,7 +3860,10 @@ fn native_web_was_blocked(request: &Value) -> bool {
                     .unwrap_or(&Value::Null)
                     .to_string()
                     .to_ascii_lowercase();
-                serialized.contains("network settings block")
+                serialized.contains("cowork-egress-blocked")
+                    || serialized.contains("coworkegressallowedhosts")
+                    || serialized.contains("network settings block")
+                    || serialized.contains("network allowlist")
                     || (serialized.contains("organization") && serialized.contains("blocked"))
             })
         })
@@ -7518,6 +7521,21 @@ mod tests {
         });
         assert_eq!(
             client_grounding_skip_reason(&denied, &config, true),
+            Some("native-egress-denial")
+        );
+        let exact_cowork_denial = json!({
+            "tools": [{"name": "web_fetch"}],
+            "messages": [
+                {
+                    "role": "tool",
+                    "tool_call_id": "ref-2",
+                    "content": "Host \"github.com\" is not on the network allowlist (cowork-egress-blocked). Allowed: 127.0.0.1"
+                },
+                {"role": "user", "content": "https://github.com/test/repo"}
+            ]
+        });
+        assert_eq!(
+            client_grounding_skip_reason(&exact_cowork_denial, &config, true),
             Some("native-egress-denial")
         );
         config.client_web_grounding_enabled = false;
