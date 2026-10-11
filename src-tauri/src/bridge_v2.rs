@@ -102,6 +102,8 @@ struct AppConfig {
     web_proxy_url: String,
     web_search_url: String,
     web_preferred_domains: Vec<String>,
+    client_web_grounding_enabled: bool,
+    client_web_allowed_domains: Vec<String>,
     shell_access_mode: String,
 }
 
@@ -129,6 +131,8 @@ impl Default for AppConfig {
                 .iter()
                 .map(|domain| (*domain).to_string())
                 .collect(),
+            client_web_grounding_enabled: false,
+            client_web_allowed_domains: Vec::new(),
             shell_access_mode: DEFAULT_SHELL_ACCESS_MODE.into(),
         }
     }
@@ -173,6 +177,10 @@ struct DiskConfig {
     web_search_url: String,
     #[serde(default = "default_web_preferred_domains")]
     web_preferred_domains: Vec<String>,
+    #[serde(default)]
+    client_web_grounding_enabled: bool,
+    #[serde(default)]
+    client_web_allowed_domains: Vec<String>,
     #[serde(default = "default_shell_access_mode")]
     shell_access_mode: String,
 }
@@ -210,6 +218,10 @@ struct ConfigInput {
     web_search_url: String,
     #[serde(default = "default_web_preferred_domains")]
     web_preferred_domains: Vec<String>,
+    #[serde(default)]
+    client_web_grounding_enabled: bool,
+    #[serde(default)]
+    client_web_allowed_domains: Vec<String>,
     #[serde(default = "default_shell_access_mode")]
     shell_access_mode: String,
 }
@@ -234,6 +246,8 @@ struct PublicConfig {
     web_proxy_url: String,
     web_search_url: String,
     web_preferred_domains: Vec<String>,
+    client_web_grounding_enabled: bool,
+    client_web_allowed_domains: Vec<String>,
     shell_access_mode: String,
 }
 
@@ -257,6 +271,8 @@ impl From<&AppConfig> for PublicConfig {
             web_proxy_url: config.web_proxy_url.clone(),
             web_search_url: config.web_search_url.clone(),
             web_preferred_domains: config.web_preferred_domains.clone(),
+            client_web_grounding_enabled: config.client_web_grounding_enabled,
+            client_web_allowed_domains: config.client_web_allowed_domains.clone(),
             shell_access_mode: config.shell_access_mode.clone(),
         }
     }
@@ -813,6 +829,8 @@ fn load_config(path: &Path) -> AppConfig {
         web_search_url: normalize_web_search_url(&disk.web_search_url)
             .unwrap_or_else(|_| DEFAULT_WEB_SEARCH_URL.into()),
         web_preferred_domains: normalize_web_preferred_domains(disk.web_preferred_domains),
+        client_web_grounding_enabled: disk.client_web_grounding_enabled,
+        client_web_allowed_domains: normalize_web_preferred_domains(disk.client_web_allowed_domains),
         shell_access_mode: normalize_shell_access_mode(&disk.shell_access_mode).into(),
     }
 }
@@ -837,6 +855,8 @@ fn persist_config(path: &Path, config: &AppConfig) -> Result<(), String> {
         web_proxy_url: config.web_proxy_url.clone(),
         web_search_url: config.web_search_url.clone(),
         web_preferred_domains: config.web_preferred_domains.clone(),
+        client_web_grounding_enabled: config.client_web_grounding_enabled,
+        client_web_allowed_domains: config.client_web_allowed_domains.clone(),
         shell_access_mode: config.shell_access_mode.clone(),
     };
     let parent = path
@@ -1126,6 +1146,14 @@ async fn save_config(
     config.web_proxy_url = normalize_web_proxy_url(&input.web_proxy_url)?;
     config.web_search_url = normalize_web_search_url(&input.web_search_url)?;
     config.web_preferred_domains = normalize_web_preferred_domains(input.web_preferred_domains);
+    config.client_web_allowed_domains =
+        normalize_web_preferred_domains(input.client_web_allowed_domains);
+    config.client_web_grounding_enabled = input.client_web_grounding_enabled;
+    if config.client_web_grounding_enabled
+        && (config.web_access_mode == "disabled" || config.client_web_allowed_domains.is_empty())
+    {
+        return Err("Enable Web access and enter at least one authorized public hostname before enabling client web grounding.".into());
+    }
     config.shell_access_mode = normalize_shell_access_mode(&input.shell_access_mode).into();
     if config.web_access_mode != "disabled"
         && config.web_proxy_mode == "manual"
