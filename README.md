@@ -1,4 +1,4 @@
-# Claude Proxy 2.0.15
+# Claude Proxy 2.0.16
 
 Claude Proxy is a Windows desktop app that connects Claude Desktop and Claude CLI directly to OpenAI-compatible model providers. Provider credentials, URLs, and model routes start empty on a fresh install.
 
@@ -58,3 +58,11 @@ When Cowork/Claude Code sends native tool schemas, the gateway must preserve the
 **Explicit approval required**: Web access must be enabled, and the user must list exact authorized public hostnames separately from preferred search domains. Each web redirect is checked against the approved hostnames and existing SSRF checks. Search snippets from other domains are omitted. Current/previous native tool-denial messages disable automatic gateway grounding; requests blocked by client or administrator policy must not be rerouted. The gateway never auto-edits Claude settings to enable this feature. No user API credentials or prompts are stored in diagnostics.
 
 **Acceptance**: the app must pass Rust, frontend, version and Windows Portable CI. Real Qwen + Cowork streaming/tool cycles must still be tested on the user's machine. Mock CI tests are not proof that a blocked native web tool now works. See PR #32 (or the v2.0.15 Draft PR) for results.
+
+## v2.0.16 — Web grounding diagnostics and clearer settings
+
+- The Advanced web panel now has bilingual guided sections: Web access, optional API-side source grounding, approved exact hostnames, and collapsed advanced network/search options. Existing settings are preserved and no administrator network policy is modified.
+- DuckDuckGo titles and snippets do **not** count as verified page content. When an authorized search result is available, the gateway must fetch its real permitted page before marking the web evidence verified; otherwise it reports an explicit failure. Redirect hosts are checked against the approved hostname list.
+- When Cowork owns native tools, the gateway records a privacy-safe grounding *skip reason* (opt-in-disabled, native-tool-followup, client-forced-native-tool, native-egress-denial, no-explicit-web-intent etc.). A native Cowork network block remains enforceable and is not bypassed.
+- Provider HTTP 400 logs include only categorized hints (tool-choice, message-format, tool-call-history, tool-schema, context/token, stream-options or unknown), counts and model route. Provider error bodies, secrets, prompts and tool outputs are **not stored**.
+- Real provider/Windows Cowork acceptance remains necessary; passing CI tests does not imply that native Cowork web tools are unlocked. PR is Draft; no Merge/Release.
