@@ -3789,6 +3789,24 @@ enum ClientGrounding {
     Search(String),
 }
 
+fn native_web_was_blocked(request: &Value) -> bool {
+    request.get("messages").and_then(Value::as_array).is_some_and(|messages| {
+        messages.iter().any(|message| {
+            let role_is_tool = message.get("role").and_then(Value::as_str) == Some("tool");
+            let embedded_tool = message.get("content").and_then(Value::as_array)
+                .is_some_and(|blocks| blocks.iter().any(|block| {
+                    block.get("type").and_then(Value::as_str) == Some("tool_result")
+                }));
+            if !role_is_tool && !embedded_tool {
+                return false;
+            }
+            let serialized = message.get("content").unwrap_or(&Value::Null).to_string().to_ascii_lowercase();
+            serialized.contains("network settings block")
+                || (serialized.contains("organization") && serialized.contains("blocked"))
+        })
+    })
+}
+
 fn plan_client_web_grounding(
     request: &Value,
     config: &AppConfig,
@@ -3798,6 +3816,7 @@ fn plan_client_web_grounding(
         || !config.client_web_grounding_enabled
         || !web_tools_enabled(config)
         || config.client_web_allowed_domains.is_empty()
+        || native_web_was_blocked(request)
     {
         return None;
     }
@@ -7288,6 +7307,74 @@ mod tests {
         assert!(tools
             .iter()
             .all(|value| { value.pointer("/annotations/readOnlyHint") == Some(&json!(true)) }));
+    }
+
+    #[test]
+    fn client_web_grounding_is_explicit_and_preserves_native_38_tool_schema() {
+        let mut config = AppConfig::default();
+        config.web_access_mode = "auto".into();
+        config.client_web_allowed_domains = vec!["docs.example.org".into()];
+        let client_tools = (0..38)
+            .map(|index| json!({"name":format!("client_tool_{index}"), "input_schema":{"type":"object"}}))
+            .collect::<Vec<Value>>();
+        let request = json!({
+            "model":"claude-fable-5-1",
+            "stream":true,
+            "tools":client_tools,
+            "messages":[{"role":"user","content":"این صفحه چیه؟ https://docs.example.org/help"}]
+        });
+        let mut converted = anthropic_to_openai(&request, &fable_route()).unwrap();
+        let original_tools = converted["tools"].clone();
+        assert!(plan_client_web_grounding(&request, &config, true).is_none());
+        config.client_web_grounding_enabled = true;
+        assert!(matches!(
+            plan_client_web_grounding(&request, &config, true),
+            Some(ClientGrounding::Fetch(_))
+        ));
+        insert_untrusted_web_evidence(&mut converted, r#"{"source_url":"https://docs.example.org/help","content":"source"}"#);
+        assert_eq!(converted["tools"], original_tools);
+        assert!(user_text_order_preserved(&request, &converted));
+        assert!(converted["messages"][0]["content"].as_str().unwrap().contains("untrusted_web_evidence"));
+        assert!(plan_client_web_grounding(&request, &config, false).is_none());
+    }
+
+    #[test]
+    fn client_web_grounding_rejects_nonapproved_hosts_and_inherited_denials() {
+        let mut config = AppConfig::default();
+        config.web_access_mode = "auto".into();
+        config.client_web_grounding_enabled = true;
+        config.client_web_allowed_domains = vec!["docs.example.org".into()];
+        let approved = Url::parse("https://docs.example.org/readme").unwrap();
+        let sibling = Url::parse("https://evil-docs.example.org/readme").unwrap();
+        let local = Url::parse("http://127.0.0.1/internal").unwrap();
+        assert!(web_host_allowed(&approved, &config.client_web_allowed_domains));
+        assert!(!web_host_allowed(&sibling, &config.client_web_allowed_domains));
+        assert!(!web_host_allowed(&local, &config.client_web_allowed_domains));
+        let denied = json!({
+            "messages":[
+                {"role":"tool","tool_call_id":"web-1","content":"Your organization's network settings block this website."},
+                {"role":"user","content":"https://docs.example.org/readme رو بخون"}
+            ],
+            "tools":[{"name":"web_fetch"}]
+        });
+        assert!(native_web_was_blocked(&denied));
+        assert!(plan_client_web_grounding(&denied, &config, true).is_none());
+        let no_search = json!({
+            "messages":[{"role":"user","content":"سلام"}],
+            "tools":[{"name":"web_fetch"}]
+        });
+        assert!(plan_client_web_grounding(&no_search, &config, true).is_none());
+    }
+
+    #[tokio::test]
+    async fn client_web_grounding_denied_before_any_network_connection() {
+        let mut config = AppConfig::default();
+        config.web_access_mode = "auto".into();
+        config.client_web_allowed_domains = vec!["docs.example.org".into()];
+        let blocked = ClientGrounding::Fetch(Url::parse("https://blocked.example.com/info").unwrap());
+        let (success, text) = collect_client_web_evidence(&config, &blocked).await;
+        assert!(!success);
+        assert!(text.contains("not explicitly authorized"));
     }
 
     #[test]
