@@ -2540,7 +2540,9 @@ async fn process_anthropic_messages(
         state.observability.log(
             "info",
             "client web grounding",
-            &format!("Request {request_id}: skipped={reason}; native Cowork tools remain client-owned."),
+            &format!(
+                "Request {request_id}: skipped={reason}; native Cowork tools remain client-owned."
+            ),
         );
     }
     let mut client_grounding_succeeded = false;
@@ -3884,16 +3886,22 @@ fn client_grounding_skip_reason(
     if request.pointer("/tool_choice/type").and_then(Value::as_str) == Some("tool") {
         return Some("client-forced-native-tool");
     }
-    let Some(last) = request.get("messages").and_then(Value::as_array)
-        .and_then(|messages| messages.last()) else {
+    let Some(last) = request
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| messages.last())
+    else {
         return Some("no-final-human-message");
     };
     if last.get("role").and_then(Value::as_str) != Some("user")
-        || last.get("content").and_then(Value::as_array).is_some_and(|blocks| {
-            blocks.iter().any(|block| {
-                block.get("type").and_then(Value::as_str) == Some("tool_result")
+        || last
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| {
+                blocks
+                    .iter()
+                    .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
             })
-        })
     {
         return Some("native-tool-followup");
     }
@@ -3959,7 +3967,10 @@ fn insert_untrusted_web_evidence(payload: &mut Value, evidence: &str) {
             message.get("role").and_then(Value::as_str) == Some("system")
                 && message.get("content").and_then(Value::as_str).is_some()
         }) {
-            let previous = system.get("content").and_then(Value::as_str).unwrap_or_default();
+            let previous = system
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             system["content"] = json!(format!("{previous}\n\n{instruction}"));
         } else {
             messages.insert(0, json!({"role": "system", "content": instruction}));
@@ -4017,8 +4028,11 @@ async fn collect_client_web_evidence(config: &AppConfig, task: &ClientGrounding)
             }
             // An HTML search result is only a title/snippet. Verify one
             // permitted page independently before marking grounding as verified.
-            let Some(source_url) = filtered.first().and_then(|item| item.get("url"))
-                .and_then(Value::as_str) else {
+            let Some(source_url) = filtered
+                .first()
+                .and_then(|item| item.get("url"))
+                .and_then(Value::as_str)
+            else {
                 return (false, "Search results had no verifiable source URL.".into());
             };
             let page = web_fetch_scoped(
@@ -4029,7 +4043,9 @@ async fn collect_client_web_evidence(config: &AppConfig, task: &ClientGrounding)
             .await;
             let page_json = serde_json::from_str::<Value>(&page).unwrap_or(Value::Null);
             if page_json.get("error").is_some()
-                || !page_json.get("content").and_then(Value::as_str)
+                || !page_json
+                    .get("content")
+                    .and_then(Value::as_str)
                     .is_some_and(|content| !content.trim().is_empty())
             {
                 return (false, "Search found titles/snippets, but the authorized source page was not verified. No page content was retrieved.".into());
@@ -4041,7 +4057,8 @@ async fn collect_client_web_evidence(config: &AppConfig, task: &ClientGrounding)
                     "page": page_json,
                     "search_results_metadata_only": filtered,
                     "retrieved_at_unix": parsed.get("retrieved_at_unix")
-                }).to_string(),
+                })
+                .to_string(),
             )
         }
     }
