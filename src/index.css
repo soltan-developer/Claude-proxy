@@ -452,3 +452,24 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
   .provider-connection-card .form-grid { grid-template-columns: minmax(0, 1fr); }
   .provider-connection-card .field { grid-column: 1 / -1; }
 }
+
+
+/* Guided Web Bridge settings: readable with RTL and keyboard navigation. */
+.web-setup { display: flex; flex-direction: column; gap: 14px; margin: 15px 0; }
+.web-setup-section { min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+.web-setup-section h3 { margin: 0 0 13px; font-size: 14px; color: var(--ink); }
+.web-grounding-toggle { display: flex; align-items: flex-start; gap: 12px; cursor: pointer; line-height: 1.65; }
+.web-grounding-toggle > input { width: 19px; height: 19px; flex: 0 0 19px; margin: 2px 0 0; accent-color: var(--accent); }
+.web-grounding-toggle > input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.web-grounding-toggle > span { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.web-grounding-toggle strong { font-size: 13px; color: var(--ink); }
+.web-grounding-toggle small { color: var(--muted); font-size: 12px; }
+.web-setup-section .field { margin-top: 12px; }
+.web-setup-section textarea { width: 100%; min-height: 82px; }
+.web-advanced-options { border: 1px solid var(--line); border-radius: 10px; padding: 0 14px; }
+.web-advanced-options summary { cursor: pointer; padding: 14px 0; font-size: 13px; font-weight: 600; color: var(--ink); }
+.web-advanced-options summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.web-advanced-options[open] .web-form-grid { padding: 12px 0 18px; border-top: 1px solid var(--line); }
+.web-validation { color: var(--red); font-size: 12px; }
+.web-setup input[dir="ltr"], .web-setup textarea[dir="ltr"] { direction: ltr; text-align: left; unicode-bidi: plaintext; }
+@media (max-width: 600px) { .web-setup-section { padding: 12px; } .web-grounding-toggle { gap: 9px; } }

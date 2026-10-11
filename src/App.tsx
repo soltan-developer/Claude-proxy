@@ -472,22 +472,66 @@ function AdvancedPage({ language, draft, setDraft, busy, isTauri, onSave, onAppl
     : translateText("Traffic will use a direct connection.", language);
   return <div className="advanced-page">
     <div className="page-heading compact-heading">
-      <div><span className="eyebrow">ADVANCED SETTINGS</span><h1>Web access bridge</h1><p>Let Claude use a controlled web tool that runs on this computer, while the model API stays on your configured provider.</p></div>
+      <div><span className="eyebrow">ADVANCED SETTINGS</span><h1>{language === "fa" ? "دسترسی وب" : "Web access"}</h1><p>{language === "fa" ? "وب Proxy و اطلاعاتی که به Qwen می‌رسد را جداگانه تنظیم کنید؛ دسترسی ابزارهای داخلی Cowork مستقل است." : "Configure Proxy web and Qwen grounding separately. Cowork's native web permissions are independent."}</p></div>
     </div>
     <div className="advanced-grid">
       <section className="card form-card web-bridge-card">
         <div className="section-title"><span className="title-icon" aria-hidden="true"><svg viewBox="0 0 18 18" focusable="false"><circle cx="9" cy="9" r="6.5" /><path d="M2.8 9h12.4M9 2.5c1.7 1.8 2.6 4 2.6 6.5S10.7 13.7 9 15.5C7.3 13.7 6.4 11.5 6.4 9S7.3 4.3 9 2.5Z" /></svg></span><div><h2>Web access</h2><p>The bridge only runs when you enable it here.</p></div></div>
-        <div className="form-grid web-form-grid">
-          <label className="field span-two"><span>Web access mode</span><ThemeSelect value={draft.webAccessMode} options={[{ value: "disabled", label: "Disabled" }, { value: "auto", label: "Automatic — model decides" }, { value: "required", label: "Required — search first" }]} onChange={(value) => setDraft((current) => ({ ...current, webAccessMode: value as BridgeConfig["webAccessMode"] }))} /></label>
-          <label className="field"><span>Web traffic route</span><ThemeSelect value={draft.webProxyMode} options={[{ value: "direct", label: "Direct connection" }, { value: "manual", label: "Manual proxy" }]} onChange={(value) => setDraft((current) => ({ ...current, webProxyMode: value as BridgeConfig["webProxyMode"] }))} /></label>
-          <label className="field"><span>Web proxy address <small>HTTP / SOCKS5</small></span><input dir="ltr" value={draft.webProxyUrl} disabled={!manualProxy} onChange={(event) => setDraft((current) => ({ ...current, webProxyUrl: event.target.value }))} placeholder="127.0.0.1:10808" autoCapitalize="off" spellCheck={false} /><small className="field-hint">For example: 127.0.0.1:10808</small></label>
-          <label className="field span-two"><span>Web search endpoint</span><input dir="ltr" value={draft.webSearchUrl} disabled={!webEnabled} onChange={(event) => setDraft((current) => ({ ...current, webSearchUrl: event.target.value }))} placeholder="https://html.duckduckgo.com/html/" autoCapitalize="off" spellCheck={false} /><small className="field-hint">An HTTPS search endpoint returning DuckDuckGo HTML results. Keep the default unless your network requires another endpoint.</small></label>
-          <div className="field span-two">
-            <label className="toggle-row"><input type="checkbox" checked={draft.clientWebGroundingEnabled} disabled={!webEnabled} onChange={(event) => setDraft((current) => ({ ...current, clientWebGroundingEnabled: event.target.checked }))} /><span>Ground explicit web requests for API-based Cowork/Code sessions (opt-in)</span></label>
-            <small className="field-hint">When a client supplies its own tools, source data from allowed public sites can be added to Qwen's context without replacing client tools. This does not enable or override blocked native Cowork web tools. Only enable where your account/device policies allow those destinations.</small>
-          </div>
-          <label className="field span-two"><span>Approved hostnames for API web grounding (required)</span><textarea dir="ltr" rows={3} disabled={!webEnabled || !draft.clientWebGroundingEnabled} value={draft.clientWebAllowedDomains.join("\n")} onChange={(event) => setDraft((current) => ({ ...current, clientWebAllowedDomains: event.target.value.split(/[\r\n]+/).map((v) => v.trim()).filter(Boolean) }))} placeholder={"docs.example.org\nexample.org"} spellCheck={false} /><small className="field-hint">One exact public hostname per line, with permission to access it. The allowlist applies to redirect hops and search result sources; no automatic authorization of blocked sites. Search queries are sent to your configured engine.</small></label>
-          <label className="field span-two"><span>Preferred web domains</span><textarea dir="ltr" value={draft.webPreferredDomains.join("\n")} disabled={!webEnabled} onChange={(event) => setDraft((current) => ({ ...current, webPreferredDomains: event.target.value.split(/[\r\n]+/).map((domain) => domain.trim()).filter(Boolean) }))} placeholder={"github.com\ndocs.example.com"} autoCapitalize="off" spellCheck={false} rows={3} /><small className="field-hint">One hostname per line. These are source preferences for the model, not a network allowlist. A URL you provide is fetched directly without a search first.</small></label>
+        <div className="web-setup" aria-label={language === "fa" ? "تنظیمات دسترسی وب" : "Web access setup"}>
+          <section className="web-setup-section" aria-labelledby="web-mode-heading">
+            <h3 id="web-mode-heading">{language === "fa" ? "۱. دسترسی وب" : "1. Web access"}</h3>
+            <label className="field">
+              <span>{language === "fa" ? "حالت اجرای ابزار وب" : "Web tool mode"}</span>
+              <ThemeSelect value={draft.webAccessMode} options={[
+                { value: "disabled", label: language === "fa" ? "خاموش" : "Disabled" },
+                { value: "auto", label: language === "fa" ? "خودکار (پیشنهادی)" : "Automatic (recommended)" },
+                { value: "required", label: language === "fa" ? "برای درخواست‌های وب اجباری" : "Required for web requests" },
+              ]} onChange={(value) => setDraft((current) => ({ ...current, webAccessMode: value as BridgeConfig["webAccessMode"] }))} />
+              <small className="field-hint">{language === "fa" ? "این گزینه فقط ابزارهای وب خود Claude Proxy را کنترل می‌کند." : "Controls Claude Proxy's own web tools only."}</small>
+            </label>
+          </section>
+          <section className="web-setup-section" aria-labelledby="web-grounding-heading">
+            <h3 id="web-grounding-heading">{language === "fa" ? "۲. افزودن منابع به پاسخ مدل API" : "2. API model source grounding"}</h3>
+            <label className="web-grounding-toggle">
+              <input type="checkbox" checked={draft.clientWebGroundingEnabled} disabled={!webEnabled}
+                onChange={(event) => setDraft((current) => ({ ...current, clientWebGroundingEnabled: event.target.checked }))} />
+              <span>
+                <strong>{language === "fa" ? "فعال‌سازی منابع مستند برای Qwen در Claude Code / Cowork" : "Provide grounded sources to Qwen in Code / Cowork"}</strong>
+                <small>{language === "fa" ? "فقط با درخواست صریح وب و برای دامنه‌های مجاز. ابزارهای داخلی Cowork تغییر نمی‌کنند." : "Explicit web requests and approved hosts only. Native Cowork tools remain unchanged."}</small>
+              </span>
+            </label>
+            {draft.clientWebGroundingEnabled && <label className="field">
+              <span>{language === "fa" ? "دامنه‌های مجاز برای بازیابی" : "Approved source hostnames"}</span>
+              <textarea dir="ltr" rows={3} value={draft.clientWebAllowedDomains.join("\n")}
+                onChange={(event) => setDraft((current) => ({ ...current, clientWebAllowedDomains: event.target.value.split(/[\r\n]+/).map((value) => value.trim()).filter(Boolean) }))}
+                placeholder={"docs.example.org\nexample.org"} spellCheck={false} />
+              <small className="field-hint">{language === "fa" ? "هر خط یک نام دامنه دقیق؛ بدون https یا مسیر. فقط نام میزبان‌هایی را وارد کنید که دسترسی به آن‌ها مجاز است. این فهرست مجوز شبکه Cowork ایجاد نمی‌کند." : "One exact authorized hostname per line, without https or paths. This list cannot grant Cowork egress permission."}</small>
+              {!draft.clientWebAllowedDomains.length && <small className="web-validation" role="alert">{language === "fa" ? "برای فعال‌سازی، دست‌کم یک دامنه مجاز وارد کنید." : "Enter at least one approved hostname to enable grounding."}</small>}
+            </label>}
+          </section>
+          <details className="web-advanced-options">
+            <summary>{language === "fa" ? "۳. تنظیمات پیشرفته شبکه و موتور جست‌وجو" : "3. Advanced network and search settings"}</summary>
+            <div className="form-grid web-form-grid">
+              <label className="field"><span>{language === "fa" ? "مسیر اتصال وب" : "Web traffic route"}</span>
+                <ThemeSelect value={draft.webProxyMode} options={[
+                  { value: "direct", label: language === "fa" ? "اتصال مستقیم" : "Direct" },
+                  { value: "manual", label: language === "fa" ? "پراکسی دستی" : "Manual proxy" },
+                ]} onChange={(value) => setDraft((current) => ({ ...current, webProxyMode: value as BridgeConfig["webProxyMode"] }))} />
+              </label>
+              <label className="field"><span>{language === "fa" ? "نشانی پراکسی HTTP/SOCKS5" : "HTTP/SOCKS5 proxy address"}</span>
+                <input dir="ltr" value={draft.webProxyUrl} disabled={!manualProxy} onChange={(event) => setDraft((current) => ({ ...current, webProxyUrl: event.target.value }))} placeholder="127.0.0.1:10808" spellCheck={false} />
+                <small className="field-hint">{language === "fa" ? "فقط در صورت اجرای واقعی پراکسی محلی." : "Only when a local proxy is actually running."}</small>
+              </label>
+              <label className="field span-two"><span>{language === "fa" ? "موتور جست‌وجو" : "Search endpoint"}</span>
+                <input dir="ltr" value={draft.webSearchUrl} disabled={!webEnabled} onChange={(event) => setDraft((current) => ({ ...current, webSearchUrl: event.target.value }))} placeholder="https://html.duckduckgo.com/html/" spellCheck={false} />
+              </label>
+              <label className="field span-two"><span>{language === "fa" ? "دامنه‌های پیشنهادی (غیرامنیتی)" : "Preferred domains (not an allowlist)"}</span>
+                <textarea dir="ltr" rows={2} value={draft.webPreferredDomains.join("\n")} disabled={!webEnabled}
+                  onChange={(event) => setDraft((current) => ({ ...current, webPreferredDomains: event.target.value.split(/[\r\n]+/).map((domain) => domain.trim()).filter(Boolean) }))} spellCheck={false} />
+                <small className="field-hint">{language === "fa" ? "صرفاً به مدل پیشنهاد می‌شوند؛ به فهرست دامنه‌های مجاز اضافه نمی‌شوند." : "Hints for the model only; these are not approved hosts."}</small>
+              </label>
+            </div>
+          </details>
         </div>
         <div className="web-status-row" aria-live="polite"><span className={`web-status-dot ${webProbeResults?.every((item) => item.ok) ? "web-status-dot-on" : ""}`} aria-hidden="true" /><div><strong>{webEnabled ? (language === "fa" ? "قابلیت وب تنظیم شده؛ نتیجهٔ تست واقعی را ببینید" : "Web configured — verify actual reachability below") : "Web access is disabled"}</strong><small>{routeSummary}</small></div></div>
         <div className="button-row"><button className="button button-primary" disabled={Boolean(busy) || webProbeBusy} onClick={onSave}>{busy === "save" ? "Saving…" : "Save advanced settings"}</button><button className="button button-secondary" disabled={!isTauri || !webEnabled || Boolean(busy) || webProbeBusy} onClick={() => void runWebChecks()}>{webProbeBusy ? (language === "fa" ? "در حال بررسی واقعی…" : "Checking live endpoints…") : (language === "fa" ? "تست واقعی وب و GitHub" : "Test real web and GitHub")}</button></div>
@@ -502,11 +546,13 @@ function AdvancedPage({ language, draft, setDraft, busy, isTauri, onSave, onAppl
         {!isTauri && <p className="preview-note">Live web checks are available in the installed Windows app.</p>}
       </section>
       <aside className="card web-bridge-info">
-        <span className="eyebrow">HOW IT WORKS</span>
-        <h2>One setting, two routes</h2>
-        <p>Automatic mode does not force web access for ordinary messages. It searches when a GitHub repository is named, reuses fetched context for follow-up opinions, and fetches again when you ask for code changes. Required mode searches each request except a URL is fetched directly. Web requests run through this computer and do not change Cowork's administrator network allowlist.</p>
-        <div className="web-route-list"><div><span className="web-route-number">01</span><div><strong>Model API</strong><small>Uses your provider URL and API key.</small></div></div><div><span className="web-route-number">02</span><div><strong>Web bridge</strong><small>Uses Direct or the proxy address above.</small></div></div></div>
-        <div className="info-note web-bridge-note"><span>i</span><p>Only public HTTP(S) pages are allowed. Localhost, private IPs, metadata services, and credentials in URLs are blocked before a request is sent.</p></div>
+        <span className="eyebrow">{language === "fa" ? "راهنمای وضعیت" : "Status guide"}</span>
+        <h2>{language === "fa" ? "دو مسیر مستقل" : "Two independent paths"}</h2>
+        <div className="web-route-list">
+          <div><span className="web-route-number">01</span><div><strong>{language === "fa" ? "وب داخلی Claude Proxy" : "Proxy web"}</strong><small>{language === "fa" ? "از رایانه شما و مسیر شبکه انتخاب‌شده استفاده می‌کند. آزمون اتصال فقط همین مسیر را بررسی می‌کند." : "Runs from your computer. The connection test checks this path only."}</small></div></div>
+          <div><span className="web-route-number">02</span><div><strong>{language === "fa" ? "وب داخلی Cowork" : "Native Cowork web"}</strong><small>{language === "fa" ? "با فهرست مجاز شبکه خود Cowork کنترل می‌شود و این برنامه نمی‌تواند محدودیت آن را تغییر دهد." : "Subject to Cowork's own egress policies. This app cannot modify that permission."}</small></div></div>
+        </div>
+        <div className="info-note web-bridge-note"><span>i</span><p>{language === "fa" ? "رسیدن به نتیجه DuckDuckGo به معنی خواندن صفحه نیست؛ فقط پس از بازیابی محتوای صفحه، نتیجه مستند اعلام می‌شود. خطاهای HTTP 400 مدل جداگانه در Diagnostics ثبت می‌شوند." : "Search listings are not verified page content. HTTP 400 model failures are diagnosed separately."}</p></div>
       </aside>
       <section className="card form-card context-advanced-card">
         <div className="section-title"><div><h2>{language === "fa" ? "مدیریت گفت‌وگوهای طولانی" : "Long conversation context"}</h2></div></div>
