@@ -451,6 +451,15 @@ function AdvancedPage({ language, draft, setDraft, busy, isTauri, onSave, onAppl
   const [webProbeResults, setWebProbeResults] = useState<WebProbeResult[] | null>(null);
   const [webProbeBusy, setWebProbeBusy] = useState(false);
   const [webProbeError, setWebProbeError] = useState("");
+  // Do not show a successful connectivity test after the network configuration changes.
+  const webProbeConfigKey = [
+    draft.webAccessMode, draft.webProxyMode, draft.webProxyUrl, draft.webSearchUrl,
+    draft.clientWebGroundingEnabled, draft.clientWebAllowedDomains.join("\n"),
+  ].join("|");
+  useEffect(() => {
+    setWebProbeResults(null);
+    setWebProbeError("");
+  }, [webProbeConfigKey]);
   async function runWebChecks() {
     setWebProbeBusy(true);
     setWebProbeResults(null);
@@ -501,11 +510,11 @@ function AdvancedPage({ language, draft, setDraft, busy, isTauri, onSave, onAppl
               </span>
             </label>
             {draft.clientWebGroundingEnabled && <label className="field">
-              <span>{language === "fa" ? "دامنه‌های مجاز برای بازیابی" : "Approved source hostnames"}</span>
+              <span>{language === "fa" ? "فهرست یکتای دامنه‌های مجاز" : "Approved source hostnames (single list)"}</span>
               <textarea dir="ltr" rows={3} value={draft.clientWebAllowedDomains.join("\n")}
                 onChange={(event) => setDraft((current) => ({ ...current, clientWebAllowedDomains: event.target.value.split(/[\r\n]+/).map((value) => value.trim()).filter(Boolean) }))}
                 placeholder={"docs.example.org\nexample.org"} spellCheck={false} />
-              <small className="field-hint">{language === "fa" ? "هر خط یک نام دامنه دقیق؛ بدون https یا مسیر. فقط نام میزبان‌هایی را وارد کنید که دسترسی به آن‌ها مجاز است. این فهرست مجوز شبکه Cowork ایجاد نمی‌کند." : "One exact authorized hostname per line, without https or paths. This list cannot grant Cowork egress permission."}</small>
+              <small className="field-hint">{language === "fa" ? "هر خط فقط یک نام میزبان دقیق؛ بدون https یا مسیر. این تنها فهرست قابل‌ویرایش دامنه‌هاست و فقط بازیابی سمت API را محدود می‌کند؛ مجوز شبکه Cowork تغییر نمی‌کند." : "One exact hostname per line, without a scheme/path. This is the only editable domain list and applies to API grounding, not native Cowork egress."}</small>
               {!draft.clientWebAllowedDomains.length && <small className="web-validation" role="alert">{language === "fa" ? "برای فعال‌سازی، دست‌کم یک دامنه مجاز وارد کنید." : "Enter at least one approved hostname to enable grounding."}</small>}
             </label>}
           </section>
@@ -525,16 +534,11 @@ function AdvancedPage({ language, draft, setDraft, busy, isTauri, onSave, onAppl
               <label className="field span-two"><span>{language === "fa" ? "موتور جست‌وجو" : "Search endpoint"}</span>
                 <input dir="ltr" value={draft.webSearchUrl} disabled={!webEnabled} onChange={(event) => setDraft((current) => ({ ...current, webSearchUrl: event.target.value }))} placeholder="https://html.duckduckgo.com/html/" spellCheck={false} />
               </label>
-              <label className="field span-two"><span>{language === "fa" ? "دامنه‌های پیشنهادی (غیرامنیتی)" : "Preferred domains (not an allowlist)"}</span>
-                <textarea dir="ltr" rows={2} value={draft.webPreferredDomains.join("\n")} disabled={!webEnabled}
-                  onChange={(event) => setDraft((current) => ({ ...current, webPreferredDomains: event.target.value.split(/[\r\n]+/).map((domain) => domain.trim()).filter(Boolean) }))} spellCheck={false} />
-                <small className="field-hint">{language === "fa" ? "صرفاً به مدل پیشنهاد می‌شوند؛ به فهرست دامنه‌های مجاز اضافه نمی‌شوند." : "Hints for the model only; these are not approved hosts."}</small>
-              </label>
             </div>
           </details>
         </div>
-        <div className="web-status-row" aria-live="polite"><span className={`web-status-dot ${webProbeResults?.every((item) => item.ok) ? "web-status-dot-on" : ""}`} aria-hidden="true" /><div><strong>{webEnabled ? (language === "fa" ? "قابلیت وب تنظیم شده؛ نتیجهٔ تست واقعی را ببینید" : "Web configured — verify actual reachability below") : "Web access is disabled"}</strong><small>{routeSummary}</small></div></div>
-        <div className="button-row"><button className="button button-primary" disabled={Boolean(busy) || webProbeBusy} onClick={onSave}>{busy === "save" ? "Saving…" : "Save advanced settings"}</button><button className="button button-secondary" disabled={!isTauri || !webEnabled || Boolean(busy) || webProbeBusy} onClick={() => void runWebChecks()}>{webProbeBusy ? (language === "fa" ? "در حال بررسی واقعی…" : "Checking live endpoints…") : (language === "fa" ? "تست واقعی وب و GitHub" : "Test real web and GitHub")}</button></div>
+        <div className="web-status-row" aria-live="polite"><span className={`web-status-dot ${webProbeResults?.length && webProbeResults.every((item) => item.ok) ? "web-status-dot-on" : ""}`} aria-hidden="true" /><div><strong>{webProbeResults?.length ? (webProbeResults.every((item) => item.ok) ? (language === "fa" ? "اتصال وب Proxy آزمایش شد: موفق" : "Proxy web test: passed") : (language === "fa" ? "اتصال وب Proxy آزمایش شد: ناموفق" : "Proxy web test: failed")) : webEnabled ? (language === "fa" ? "وب Proxy تنظیم شده؛ هنوز آزمایش نشده" : "Proxy web is configured; not yet tested") : (language === "fa" ? "دسترسی وب Proxy خاموش است" : "Proxy web is disabled")}</strong><small>{routeSummary}</small></div></div>
+        <div className="button-row"><button className="button button-primary" disabled={Boolean(busy) || webProbeBusy || (draft.clientWebGroundingEnabled && (!webEnabled || draft.clientWebAllowedDomains.length === 0))} onClick={onSave}>{busy === "save" ? "Saving…" : "Save advanced settings"}</button><button className="button button-secondary" disabled={!isTauri || !webEnabled || Boolean(busy) || webProbeBusy} onClick={() => void runWebChecks()}>{webProbeBusy ? (language === "fa" ? "در حال بررسی واقعی…" : "Checking live endpoints…") : (language === "fa" ? "تست واقعی وب و GitHub" : "Test real web and GitHub")}</button></div>
         {webProbeResults && <div className="web-route-list" role="status" aria-live="polite">
           {webProbeResults.map((item) => <div key={item.check}>
             <span className="web-route-number">{item.ok ? "✓" : "×"}</span>
@@ -542,7 +546,7 @@ function AdvancedPage({ language, draft, setDraft, busy, isTauri, onSave, onAppl
           </div>)}
         </div>}
         {webProbeError && <p role="alert" className="preview-note">{webProbeError}</p>}
-        <p className="preview-note">{language === "fa" ? "این تست فقط اتصال محلی و ابزارهای وب خود Proxy را بررسی می‌کند؛ دسترسی ابزارهای داخلی Cowork و سیاست شبکهٔ سازمان مستقل است." : "These tests check Proxy's own gateway and web tools. Cowork/Code native web permissions remain separate."}</p>
+        <p className="preview-note">{language === "fa" ? "نتیجه این تست فقط برای وب Proxy است؛ وب داخلی Cowork مجوز جداگانه دارد. مشاهدهٔ «منبع مستند» در یک درخواست API اثبات نمی‌کند که Cowork توانسته همان صفحه را باز کند." : "These results only verify Proxy web. Cowork's native web policy is independent. Evidence in one API request is not proof that a native Cowork tool read the same page."}</p>
         {!isTauri && <p className="preview-note">Live web checks are available in the installed Windows app.</p>}
       </section>
       <aside className="card web-bridge-info">
