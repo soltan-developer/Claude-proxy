@@ -1,4 +1,4 @@
-# Claude Proxy 2.0.18
+# Claude Proxy 2.0.19
 
 Claude Proxy is a Windows desktop app that connects Claude Desktop and Claude CLI directly to OpenAI-compatible model providers. Provider credentials, URLs, and model routes start empty on a fresh install.
 
@@ -81,3 +81,11 @@ The native Cowork Web Fetch/Search network policy is enforced by the **Cowork cl
 Previously, the `forced_tool_choice` diagnostic flag incorrectly used mere field presence, so an incoming `tool_choice: {type: 'auto'}` could be mislabeled forced. In v2.0.18 it uses actual incoming `tool`, `any`, or `required` semantics, and the optional API grounding does not prefetch while a native tool is explicitly forced. Rust regression tests exercise `auto` vs `any`/`tool` and the preservation of the client-owned tool list.
 
 Neither API settings nor this change modifies `coworkEgressAllowedHosts`. An unauthorized host must stay denied. A displayed source hyperlink is not proof of fetching its contents, and unverified repo stats must not be invented. Real Windows acceptance and independent DNS rebinding/SSRF review are still required before production readiness; do not merge the Draft PR or make a public Release without explicit approval.
+
+## v2.0.19 — WebSearch parser and scoped source verification
+
+The user reported that Code's native WebFetch, Claude Proxy MCP fetch and read-only curl could fetch an authorized GitHub page, but the Claude Proxy MCP search returned `no verifiable results` and the optional API grounding intermittently reported `no_approved_source_page`. Cowork's native WebFetch remains denied by its own `coworkEgressAllowedHosts` policy; this release does **not** change it.
+
+Fixes: DuckDuckGo HTML extractor supports single/double quoted attributes, reordered classes and safe anchor selection; an empty HTTP-200 HTML response is differentiated as `search_provider_challenge`, `search_no_results`, or `search_html_unrecognized` without leaking response bodies into diagnostics. Multiple optional `domains` selectors are combined with `OR` instead of an impossible intersection. Domain selectors are **search query hints**, never permission to access blocked destinations. Optional server-side grounding verifies up to three **already-approved** search-result hosts rather than failing on the first unreadable page, while remaining fail-closed if none is readable. Regression tests exercise URL safety, HTML variants, Persian UTF-8 and query filters. No fallback to a different unapproved search engine, no client tool substitution, no prompt/result/body logging.
+
+**Acceptance:** Rust, frontend, Node MCP and Windows Portable CI plus real Windows searches are required. Do not merge Draft PR or make public Release without owner permission.
