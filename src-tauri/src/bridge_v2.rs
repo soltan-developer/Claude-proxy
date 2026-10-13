@@ -1071,6 +1071,109 @@ fn ensure_gateway_token(config: &mut AppConfig) -> String {
     config.gateway_token.clone()
 }
 
+
+const BROWSER_SEARCH_WINDOW: &str = "browser-search";
+
+fn browser_search_url(engine: &str, query: &str) -> Result<Url, String> {
+    let query = query.trim();
+    if query.is_empty() || query.chars().count() > 250 {
+        return Err("Enter a search phrase between 1 and 250 characters.".into());
+    }
+    let search_base = match engine {
+        "google" => "https://www.google.com/search",
+        "bing" => "https://www.bing.com/search",
+        "mwmbl" => "https://mwmbl.org/",
+        _ => return Err("Choose Google, Bing, or Mwmbl.".into()),
+    };
+    let mut url = Url::parse(search_base).map_err(|error| error.to_string())?;
+    let parameter = if engine == "mwmbl" { "s" } else { "q" };
+    url.query_pairs_mut().append_pair(parameter, query);
+    Ok(url)
+}
+
+fn browser_public_page(url: &Url) -> Result<(), String> {
+    validate_web_url(url.as_str())?;
+    if url.scheme() != "https" || url.port_or_known_default() != Some(443) {
+        return Err("The browser assistant accepts only public HTTPS pages on port 443.".into());
+    }
+    Ok(())
+}
+
+fn browser_search_landing(url: &Url) -> bool {
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let path = url.path();
+    ((host == "www.google.com" || host == "google.com")
+        && (path == "/search" || path == "/"))
+        || ((host == "www.bing.com" || host == "bing.com")
+            && (path == "/search" || path == "/"))
+        || ((host == "mwmbl.org" || host == "www.mwmbl.org") && path == "/")
+}
+
+#[tauri::command]
+async fn open_browser_search(app: AppHandle, engine: String, query: String) -> Result<String, String> {
+    let url = browser_search_url(&engine, &query)?;
+    if let Some(window) = app.get_webview_window(BROWSER_SEARCH_WINDOW) {
+        window.navigate(url.clone()).map_err(|error| error.to_string())?;
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+    } else {
+        // This remote webview is not included in the main app's Tauri capability.
+        // Its isolated, incognito profile never reads the user's Chrome/Edge cookies.
+        let browser_data = app
+            .path()
+            .app_local_data_dir()
+            .map_err(|error| error.to_string())?
+            .join("browser-search");
+        tauri::WebviewWindowBuilder::new(
+            &app,
+            BROWSER_SEARCH_WINDOW,
+            tauri::WebviewUrl::External(url.clone()),
+        )
+        .title("Claude Proxy - Browser Assisted Search")
+        .inner_size(1120.0, 780.0)
+        .data_directory(browser_data)
+        .incognito(true)
+        .on_navigation(|destination| browser_public_page(destination).is_ok())
+        .build()
+        .map_err(|error| format!("Could not open Windows WebView2: {error}"))?;
+    }
+    Ok(url.to_string())
+}
+
+#[tauri::command]
+async fn browser_selected_url(app: AppHandle) -> Result<String, String> {
+    let window = app
+        .get_webview_window(BROWSER_SEARCH_WINDOW)
+        .ok_or("Open the browser search window first.")?;
+    let url = window.url().map_err(|error| error.to_string())?;
+    browser_public_page(&url)?;
+    if browser_search_landing(&url) {
+        return Err("Open a result page inside the browser before selecting a source.".into());
+    }
+    Ok(url.to_string())
+}
+
+#[tauri::command]
+async fn browser_read_selected_page(
+    app: AppHandle,
+    state: TauriState<'_, BridgeState>,
+) -> Result<Value, String> {
+    let source_url = browser_selected_url(app).await?;
+    let config = state.config.read().await.clone();
+    if config.web_access_mode == "disabled" {
+        return Err("Enable the Proxy Web access setting before reading selected sources.".into());
+    }
+    // Never read remote DOM/cookies or scrape Google result listings.
+    // Reuse the existing redirect, DNS, body-size and SSRF checks for selected pages.
+    let response = web_fetch(&config, &json!({ "url": source_url })).await;
+    let result: Value = serde_json::from_str(&response)
+        .map_err(|_| "WebFetch returned an invalid response.".to_string())?;
+    if result.get("error").is_some() {
+        return Err(result["error"].as_str().unwrap_or("Selected page could not be read.").to_string());
+    }
+    Ok(result)
+}
+
 #[tauri::command]
 async fn get_config(state: TauriState<'_, BridgeState>) -> Result<PublicConfig, String> {
     Ok(PublicConfig::from(&*state.config.read().await))
@@ -7272,6 +7375,9 @@ pub fn run() {
             stop_proxy,
             test_local_route,
             test_web_access,
+            open_browser_search,
+            browser_selected_url,
+            browser_read_selected_page,
             apply_claude_code_web_mcp,
             apply_claude_desktop,
             apply_claude_cli,
@@ -7297,6 +7403,42 @@ mod tests {
             max_output_tokens: 8_000,
             is_default: true,
         }
+    }
+
+
+    #[test]
+    fn browser_assisted_search_accepts_only_known_engines_and_short_queries() {
+        let google = browser_search_url("google", "آزمایش claude & code").unwrap();
+        assert_eq!(google.host_str(), Some("www.google.com"));
+        assert_eq!(
+            google.query_pairs().find(|(key, _)| key == "q").unwrap().1,
+            "آزمایش claude & code"
+        );
+        assert_eq!(
+            browser_search_url("bing", "github").unwrap().host_str(),
+            Some("www.bing.com")
+        );
+        assert!(browser_search_url("unknown", "hello").is_err());
+        assert!(browser_search_url("google", "   ").is_err());
+        assert!(browser_search_url("google", &"x".repeat(251)).is_err());
+    }
+
+    #[test]
+    fn browser_selection_rejects_private_insecure_and_result_listings() {
+        for raw in [
+            "http://github.com/a",
+            "https://127.0.0.1/",
+            "https://192.168.1.1/",
+            "https://localhost/",
+            "https://example.com:8443/",
+            "file:///C:/",
+        ] {
+            assert!(browser_public_page(&Url::parse(raw).unwrap()).is_err(), "{raw}");
+        }
+        assert!(browser_public_page(&Url::parse("https://github.com/a").unwrap()).is_ok());
+        assert!(browser_search_landing(&Url::parse("https://www.google.com/search?q=hello").unwrap()));
+        assert!(browser_search_landing(&Url::parse("https://www.bing.com/search?q=hello").unwrap()));
+        assert!(!browser_search_landing(&Url::parse("https://github.com/anthropics/claude-code").unwrap()));
     }
 
     #[test]

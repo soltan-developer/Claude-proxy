@@ -88,6 +88,30 @@ export async function testWebAccess(): Promise<WebProbeResult[]> {
   return invoke<WebProbeResult[]>("test_web_access");
 }
 
+
+export type BrowserPageResult = {
+  url: string;
+  source_url: string;
+  content_type: string;
+  content: string;
+  retrieved_at_unix: number;
+};
+
+// Browser-assisted search is opt-in, user-mediated and separate from native
+// Claude Code/Cowork tools. The remote page has no main-window Tauri permissions.
+export async function openBrowserSearch(engine: "google" | "bing" | "mwmbl", query: string): Promise<string> {
+  if (!isTauriRuntime()) throw new Error("Browser search requires the Windows desktop app.");
+  return invoke<string>("open_browser_search", { engine, query });
+}
+export async function getBrowserSelectedUrl(): Promise<string> {
+  if (!isTauriRuntime()) throw new Error("Browser search requires the Windows desktop app.");
+  return invoke<string>("browser_selected_url");
+}
+export async function readBrowserSelectedPage(): Promise<BrowserPageResult> {
+  if (!isTauriRuntime()) throw new Error("Browser search requires the Windows desktop app.");
+  return invoke<BrowserPageResult>("browser_read_selected_page");
+}
+
 export async function applyClaudeDesktop(): Promise<string> {
   if (!isTauriRuntime()) throw new Error("Claude Desktop setup is available in the desktop app.");
   return invoke<string>("apply_claude_desktop");
