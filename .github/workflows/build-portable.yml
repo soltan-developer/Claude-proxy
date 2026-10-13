@@ -19,6 +19,7 @@ on:
       - v2/2.0.15-api-web-grounding
       - v2/2.0.16-web-diagnostics-ui
       - v2/2.0.17-single-domain-web-settings
+      - v2/2.0.18-tool-choice-provenance
       - v2/2.0.9-tool-fidelity-regressions
   workflow_dispatch:
 
