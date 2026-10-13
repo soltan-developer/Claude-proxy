@@ -2559,16 +2559,16 @@ async fn process_anthropic_messages(
                 if success { "info" } else { "warning" },
                 "client web grounding",
                 &format!(
-                    "Request {request_id}: {}, {} ({} ms); client-owned tools preserved.",
+                    "Request {request_id}: {}, {}; scope=proxy-only, native_cowork_web_unchanged=true ({} ms); client-owned tools preserved.",
                     if matches!(plan, ClientGrounding::Fetch(_)) {
                         "fetch"
                     } else {
                         "search"
                     },
                     if success {
-                        "verified"
+                        "approved_source_page_received"
                     } else {
-                        "unavailable or disallowed"
+                        "no_approved_source_page"
                     },
                     started.elapsed().as_millis(),
                 ),
@@ -2656,7 +2656,7 @@ async fn process_anthropic_messages(
             request.get("tools").and_then(Value::as_array).map_or(0, Vec::len),
             request.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
             config.client_web_grounding_enabled,
-            payload.get("tool_choice").is_some(),
+            client_forced_tool_choice(&request),
         ),
     );
     if let Some(result) = state
@@ -3872,6 +3872,20 @@ fn native_web_was_blocked(request: &Value) -> bool {
         })
 }
 
+// A populated tool_choice is not necessarily forced: "auto" is a valid
+// client value. Use the *inbound* Anthropic semantics instead of testing
+// whether the translated JSON merely has a tool_choice field.
+fn client_forced_tool_choice(request: &Value) -> bool {
+    match request.get("tool_choice") {
+        Some(Value::String(value)) => matches!(value.as_str(), "required"),
+        Some(Value::Object(choice)) => matches!(
+            choice.get("type").and_then(Value::as_str),
+            Some("tool" | "any" | "required" | "function")
+        ),
+        _ => false,
+    }
+}
+
 fn client_grounding_skip_reason(
     request: &Value,
     config: &AppConfig,
@@ -3889,7 +3903,7 @@ fn client_grounding_skip_reason(
     if native_web_was_blocked(request) {
         return Some("native-egress-denial");
     }
-    if request.pointer("/tool_choice/type").and_then(Value::as_str) == Some("tool") {
+    if client_forced_tool_choice(request) {
         return Some("client-forced-native-tool");
     }
     let Some(last) = request
@@ -7665,6 +7679,34 @@ mod tests {
         assert!(system.contains("Existing Cowork agent setup"));
         assert!(system.contains("native Cowork web tool"));
         assert!(system.contains("never invent repository statistics"));
+    }
+
+    #[test]
+    fn tool_choice_auto_is_not_forced_and_any_is_not_a_safe_grounding_request() {
+        let mut config = AppConfig::default();
+        config.web_access_mode = "auto".into();
+        config.client_web_grounding_enabled = true;
+        config.client_web_allowed_domains = vec!["docs.example.org".into()];
+        let mut request = json!({
+            "tools":[{"name":"web_search", "input_schema":{"type":"object"}}],
+            "tool_choice":{"type":"auto"},
+            "messages":[{"role":"user","content":"https://docs.example.org/guide"}]
+        });
+        assert!(!client_forced_tool_choice(&request));
+        assert_eq!(client_grounding_skip_reason(&request, &config, true), None);
+        request["tool_choice"] = json!({"type":"any"});
+        assert!(client_forced_tool_choice(&request));
+        assert_eq!(
+            client_grounding_skip_reason(&request, &config, true),
+            Some("client-forced-native-tool")
+        );
+        request["tool_choice"] = json!({"type":"tool","name":"web_search"});
+        assert!(client_forced_tool_choice(&request));
+        assert!(plan_client_web_grounding(&request, &config, true).is_none());
+        request["tool_choice"] = json!("auto");
+        assert!(!client_forced_tool_choice(&request));
+        request["tool_choice"] = json!("required");
+        assert!(client_forced_tool_choice(&request));
     }
 
     #[test]

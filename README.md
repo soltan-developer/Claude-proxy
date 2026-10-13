@@ -1,4 +1,4 @@
-# Claude Proxy 2.0.17
+# Claude Proxy 2.0.18
 
 Claude Proxy is a Windows desktop app that connects Claude Desktop and Claude CLI directly to OpenAI-compatible model providers. Provider credentials, URLs, and model routes start empty on a fresh install.
 
@@ -73,3 +73,11 @@ When Cowork/Claude Code sends native tool schemas, the gateway must preserve the
 - The UI invalidates stale connection-test indicators when route or host settings change and blocks save if grounding is enabled with an empty allowlist. The green test checks only **Claude Proxy** web connectivity, **not** native Cowork web egress.
 - When the incoming request includes a native Cowork `cowork-egress-blocked` denial, add a narrow source-integrity notice to the provider context: don't claim the native tool fetched GitHub; distinguish verified source content from search snippets, and don't fabricate repository stars/commits/licenses. Existing client tool definitions and control messages remain preserved.
 - No Claude Desktop/Cowork settings or `coworkEgressAllowedHosts` network permissions are changed. An authorized native Cowork web fetch still needs a client-side permission decision; this gateway cannot grant it. Config defaults are not changed. Keep this PR Draft until actual Windows/Qwen/Cowork acceptance.
+
+## v2.0.18 — accurate client tool choice and API-source provenance
+
+The native Cowork Web Fetch/Search network policy is enforced by the **Cowork client**, not by the Qwen model provider nor the Rust API gateway. An outgoing proxy-web request on Windows can succeed independently, but must never be presented as proof that Cowork's native web tool succeeded. The gateway diagnostic line now explicitly labels source evidence as `scope=proxy-only, native_cowork_web_unchanged=true` and calls a successful body fetch `approved_source_page_received`, not a guarantee of repository-content truth.
+
+Previously, the `forced_tool_choice` diagnostic flag incorrectly used mere field presence, so an incoming `tool_choice: {type: 'auto'}` could be mislabeled forced. In v2.0.18 it uses actual incoming `tool`, `any`, or `required` semantics, and the optional API grounding does not prefetch while a native tool is explicitly forced. Rust regression tests exercise `auto` vs `any`/`tool` and the preservation of the client-owned tool list.
+
+Neither API settings nor this change modifies `coworkEgressAllowedHosts`. An unauthorized host must stay denied. A displayed source hyperlink is not proof of fetching its contents, and unverified repo stats must not be invented. Real Windows acceptance and independent DNS rebinding/SSRF review are still required before production readiness; do not merge the Draft PR or make a public Release without explicit approval.
