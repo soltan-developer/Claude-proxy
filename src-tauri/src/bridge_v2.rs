@@ -2109,14 +2109,20 @@ async fn mcp_post(
             } else {
                 web_fetch(&config, &args).await
             };
-            let is_error = serde_json::from_str::<Value>(&text)
-                .ok()
-                .is_none_or(|value| value.get("error").is_some());
+            let response_json = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
+            let is_error = response_json.is_null() || response_json.get("error").is_some();
+            let failure_category = match response_json.get("error_code").and_then(Value::as_str) {
+                Some("search_provider_challenge") => "search_provider_challenge",
+                Some("search_no_results") => "search_no_results",
+                Some("search_html_unrecognized") => "search_html_unrecognized",
+                _ if is_error => "network_or_provider_error",
+                _ => "none",
+            };
             state.observability.log(
                 if is_error { "warning" } else { "info" },
                 "mcp web tool",
                 &format!(
-                    "{}: {} ({} ms).",
+                    "{}: {}; failure_category={failure_category} ({} ms).",
                     if name == "claude_proxy_web_search" {
                         "search"
                     } else {
@@ -4045,7 +4051,14 @@ async fn collect_client_web_evidence(config: &AppConfig, task: &ClientGrounding)
             }
         }
         ClientGrounding::Search(query) => {
-            let result = web_search(config, &json!({"query": query})).await;
+            let result = web_search(
+                config,
+                &json!({
+                    "query": query,
+                    "domains": config.client_web_allowed_domains
+                }),
+            )
+            .await;
             let parsed = serde_json::from_str::<Value>(&result).unwrap_or(Value::Null);
             let filtered = parsed
                 .get("results")
