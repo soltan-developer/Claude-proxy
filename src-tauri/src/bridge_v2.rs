@@ -1071,7 +1071,6 @@ fn ensure_gateway_token(config: &mut AppConfig) -> String {
     config.gateway_token.clone()
 }
 
-
 const BROWSER_SEARCH_WINDOW: &str = "browser-search";
 
 fn browser_search_url(engine: &str, query: &str) -> Result<Url, String> {
@@ -1102,18 +1101,22 @@ fn browser_public_page(url: &Url) -> Result<(), String> {
 fn browser_search_landing(url: &Url) -> bool {
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
     let path = url.path();
-    ((host == "www.google.com" || host == "google.com")
-        && (path == "/search" || path == "/"))
-        || ((host == "www.bing.com" || host == "bing.com")
-            && (path == "/search" || path == "/"))
+    ((host == "www.google.com" || host == "google.com") && (path == "/search" || path == "/"))
+        || ((host == "www.bing.com" || host == "bing.com") && (path == "/search" || path == "/"))
         || ((host == "mwmbl.org" || host == "www.mwmbl.org") && path == "/")
 }
 
 #[tauri::command]
-async fn open_browser_search(app: AppHandle, engine: String, query: String) -> Result<String, String> {
+async fn open_browser_search(
+    app: AppHandle,
+    engine: String,
+    query: String,
+) -> Result<String, String> {
     let url = browser_search_url(&engine, &query)?;
     if let Some(window) = app.get_webview_window(BROWSER_SEARCH_WINDOW) {
-        window.navigate(url.clone()).map_err(|error| error.to_string())?;
+        window
+            .navigate(url.clone())
+            .map_err(|error| error.to_string())?;
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
     } else {
@@ -1169,7 +1172,10 @@ async fn browser_read_selected_page(
     let result: Value = serde_json::from_str(&response)
         .map_err(|_| "WebFetch returned an invalid response.".to_string())?;
     if result.get("error").is_some() {
-        return Err(result["error"].as_str().unwrap_or("Selected page could not be read.").to_string());
+        return Err(result["error"]
+            .as_str()
+            .unwrap_or("Selected page could not be read.")
+            .to_string());
     }
     Ok(result)
 }
@@ -7405,7 +7411,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn browser_assisted_search_accepts_only_known_engines_and_short_queries() {
         let google = browser_search_url("google", "آزمایش claude & code").unwrap();
@@ -7433,12 +7438,21 @@ mod tests {
             "https://example.com:8443/",
             "file:///C:/",
         ] {
-            assert!(browser_public_page(&Url::parse(raw).unwrap()).is_err(), "{raw}");
+            assert!(
+                browser_public_page(&Url::parse(raw).unwrap()).is_err(),
+                "{raw}"
+            );
         }
         assert!(browser_public_page(&Url::parse("https://github.com/a").unwrap()).is_ok());
-        assert!(browser_search_landing(&Url::parse("https://www.google.com/search?q=hello").unwrap()));
-        assert!(browser_search_landing(&Url::parse("https://www.bing.com/search?q=hello").unwrap()));
-        assert!(!browser_search_landing(&Url::parse("https://github.com/anthropics/claude-code").unwrap()));
+        assert!(browser_search_landing(
+            &Url::parse("https://www.google.com/search?q=hello").unwrap()
+        ));
+        assert!(browser_search_landing(
+            &Url::parse("https://www.bing.com/search?q=hello").unwrap()
+        ));
+        assert!(!browser_search_landing(
+            &Url::parse("https://github.com/anthropics/claude-code").unwrap()
+        ));
     }
 
     #[test]
