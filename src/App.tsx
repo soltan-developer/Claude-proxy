@@ -24,6 +24,10 @@ import {
   startProxy,
   stopProxy,
   testWebAccess,
+  openBrowserSearch,
+  getBrowserSelectedUrl,
+  readBrowserSelectedPage,
+  type BrowserPageResult,
   type WebProbeResult,
 } from "./lib/tauri";
 import { emptyConfig, routeRoles, type BridgeConfig, type ModelRoute, type ProxyStatus } from "./types";
@@ -438,6 +442,91 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="app-modal card" role="dialog" aria-modal="true" aria-labelledby="modal-title"><button className="modal-close" type="button" aria-label="Close dialog" onClick={onClose}>×</button><span className="eyebrow">CLAUDE PROXY</span><h2 id="modal-title">{title}</h2><div className="modal-copy">{children}</div></section></div>;
 }
 
+
+function BrowserAssistedSearch({ language, enabled, isTauri }: { language: Language; enabled: boolean; isTauri: boolean }) {
+  const [query, setQuery] = useState("");
+  const [engine, setEngine] = useState<"google" | "bing" | "mwmbl">("google");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<BrowserPageResult | null>(null);
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [error, setError] = useState("");
+  async function open() {
+    setLoading(true);
+    setResult(null);
+    setSourceUrl("");
+    setError("");
+    try { await openBrowserSearch(engine, query); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setLoading(false); }
+  }
+  async function select() {
+    setLoading(true);
+    setError("");
+    setResult(null);
+    try { setSourceUrl(await getBrowserSelectedUrl()); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setLoading(false); }
+  }
+  async function read() {
+    setLoading(true);
+    setError("");
+    setResult(null);
+    try {
+      const page = await readBrowserSelectedPage();
+      setSourceUrl(page.source_url || page.url);
+      setResult(page);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setLoading(false); }
+  }
+  async function copy(text: string) {
+    try { await navigator.clipboard.writeText(text); }
+    catch { setError(language === "fa" ? "کپی انجام نشد. دسترسی Clipboard را بررسی کنید." : "Could not copy. Check clipboard permission."); }
+  }
+  const fa = language === "fa";
+  return <section className="card form-card browser-assist-card">
+    <div className="section-title"><span className="title-icon" aria-hidden="true">◉</span>
+      <div><h2>{fa ? "جست‌وجو با مرورگر ویندوز" : "Windows browser-assisted search"}</h2>
+        <p>{fa ? "مرورگر WebView2 را باز کنید، خودتان یک نتیجه را انتخاب کنید و همان صفحه را از مسیر WebFetch بخوانید." : "Open the WebView2 browser, manually choose a result, and read only the chosen source through WebFetch."}</p>
+      </div>
+    </div>
+    <div className="web-setup">
+      <label className="field"><span>{fa ? "موتور جست‌وجو" : "Search engine"}</span>
+        <select value={engine} onChange={(event) => setEngine(event.target.value as "google" | "bing" | "mwmbl")}>
+          <option value="google">Google</option><option value="bing">Bing</option><option value="mwmbl">Mwmbl</option>
+        </select>
+      </label>
+      <label className="field"><span>{fa ? "عبارت جست‌وجو" : "Search query"}</span>
+        <input value={query} maxLength={250} onChange={(event) => setQuery(event.target.value)} placeholder="Claude Code GitHub" />
+      </label>
+      <div className="button-row">
+        <button className="button button-primary" disabled={!isTauri || loading || !query.trim()} onClick={() => void open()}>
+          {fa ? "۱. بازکردن مرورگر" : "1. Open browser"}
+        </button>
+        <button className="button button-secondary" disabled={!isTauri || loading} onClick={() => void select()}>
+          {fa ? "۲. انتخاب صفحه فعلی" : "2. Select current page"}
+        </button>
+        <button className="button button-secondary" disabled={!isTauri || !enabled || loading} onClick={() => void read()}>
+          {fa ? "۳. خواندن صفحه انتخاب‌شده" : "3. Read selected page"}
+        </button>
+      </div>
+      {sourceUrl && <div className="browser-assist-result"><strong>{fa ? "منبع انتخاب‌شده:" : "Selected source:"}</strong>
+        <code dir="ltr">{sourceUrl}</code>
+        <button className="button button-secondary" onClick={() => void copy(sourceUrl)}>{fa ? "کپی آدرس" : "Copy URL"}</button>
+      </div>}
+      {result && <div className="browser-assist-result" role="status">
+        <strong>{fa ? "محتوای بازیابی‌شده" : "Retrieved page content"}</strong>
+        <p>{result.content.slice(0, 700)}{result.content.length > 700 ? "…" : ""}</p>
+        <button className="button button-secondary" onClick={() => void copy(
+          `Source: ${result.source_url || result.url}\nRetrieved: ${new Date(result.retrieved_at_unix * 1000).toISOString()}\n\n${result.content}`
+        )}>{fa ? "کپی منبع و متن برای چسباندن در گفتگو" : "Copy source and text to paste into chat"}</button>
+      </div>}
+      {error && <p className="preview-note" role="alert">{error}</p>}
+      {!enabled && <p className="preview-note">{fa ? "برای خواندن صفحه، ابتدا Web access را فعال و ذخیره کنید. بازکردن مرورگر مستقل است." : "Enable and save Web access before reading a page. Browser navigation is separate."}</p>}
+      <p className="preview-note">{fa ? "فقط مرور تعاملی؛ جست‌وجوی Google به‌صورت خودکار استخراج نمی‌شود. این ابزار سیاست وب داخلی Cowork را تغییر نمی‌دهد. پنجره وب دسترسی مدیریتی به Claude Proxy ندارد." : "User-mediated browsing only; Google results are not scraped. This does not change Cowork's native web policy. Remote websites have no administrative access to Claude Proxy."}</p>
+    </div>
+  </section>;
+}
+
 function AdvancedPage({ language, draft, setDraft, busy, isTauri, onSave, onApplyOutputLimit, onTest }: {
   language: Language;
   draft: Draft;
@@ -483,6 +572,7 @@ function AdvancedPage({ language, draft, setDraft, busy, isTauri, onSave, onAppl
     <div className="page-heading compact-heading">
       <div><span className="eyebrow">ADVANCED SETTINGS</span><h1>{language === "fa" ? "دسترسی وب" : "Web access"}</h1><p>{language === "fa" ? "وب Proxy و اطلاعاتی که به Qwen می‌رسد را جداگانه تنظیم کنید؛ دسترسی ابزارهای داخلی Cowork مستقل است." : "Configure Proxy web and Qwen grounding separately. Cowork's native web permissions are independent."}</p></div>
     </div>
+    <BrowserAssistedSearch language={language} enabled={draft.webAccessMode !== "disabled"} isTauri={isTauri} />
     <div className="advanced-grid">
       <section className="card form-card web-bridge-card">
         <div className="section-title"><span className="title-icon" aria-hidden="true"><svg viewBox="0 0 18 18" focusable="false"><circle cx="9" cy="9" r="6.5" /><path d="M2.8 9h12.4M9 2.5c1.7 1.8 2.6 4 2.6 6.5S10.7 13.7 9 15.5C7.3 13.7 6.4 11.5 6.4 9S7.3 4.3 9 2.5Z" /></svg></span><div><h2>Web access</h2><p>The bridge only runs when you enable it here.</p></div></div>

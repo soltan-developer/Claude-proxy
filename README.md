@@ -1,4 +1,4 @@
-# Claude Proxy 2.0.19
+# Claude Proxy 2.0.20
 
 Claude Proxy is a Windows desktop app that connects Claude Desktop and Claude CLI directly to OpenAI-compatible model providers. Provider credentials, URLs, and model routes start empty on a fresh install.
 
@@ -89,3 +89,17 @@ The user reported that Code's native WebFetch, Claude Proxy MCP fetch and read-o
 Fixes: DuckDuckGo HTML extractor supports single/double quoted attributes, reordered classes and safe anchor selection; an empty HTTP-200 HTML response is differentiated as `search_provider_challenge`, `search_no_results`, or `search_html_unrecognized` without leaking response bodies into diagnostics. Multiple optional `domains` selectors are combined with `OR` instead of an impossible intersection. Domain selectors are **search query hints**, never permission to access blocked destinations. Optional server-side grounding verifies up to three **already-approved** search-result hosts rather than failing on the first unreadable page, while remaining fail-closed if none is readable. Regression tests exercise URL safety, HTML variants, Persian UTF-8 and query filters. No fallback to a different unapproved search engine, no client tool substitution, no prompt/result/body logging.
 
 **Acceptance:** Rust, frontend, Node MCP and Windows Portable CI plus real Windows searches are required. Do not merge Draft PR or make public Release without owner permission.
+
+
+## v2.0.20 — Windows WebView2 browser-assisted search (opt-in)
+
+The **Advanced settings → Windows browser-assisted search** panel opens an isolated WebView2 window for an explicit Google, Bing or Mwmbl query. Users browse normally and **click the actual page** they want to cite. Back in Claude Proxy, **Select current page** reads only the top-level URL; **Read selected page** reuses the existing read-only WebFetch with its DNS, redirect, SSRF, response-size and URL restrictions. After a successful page fetch, the user may **Copy source and text to paste into chat**; this is deliberately manual and transparent. It does not silently alter upstream prompts or call client-owned Claude/Cowork tools.
+
+- Windows WebView2 Runtime is required (already required by Tauri).
+- No new server, Docker, browser installation, third-party API key, or browser automation dependency.
+- Browser data is separate from the main UI and runs incognito. The browser-search window is not in the main Tauri capability's `windows: ["main"]` permission list, so remote pages cannot invoke admin commands.
+- Navigation allows public HTTPS URLs on port 443 only; local/private IPs, loopback and insecure URLs are rejected. Selecting a Google/Bing/Mwmbl search landing page is rejected: users must click a result page.
+- The app never extracts Google search-result DOM, cookies, browser passwords or session state. CAPTCHA and provider limits are not bypassed. WebFetch may fail for JS-only or inaccessible pages; no fabricated citations.
+- Reading requires **saved** Web access enabled; opening the browser is independent of web tools. Client-owning Cowork web policy remains unchanged.
+- Note: This is a **user-assisted local source handoff**, not unattended WebSearch for Qwen. Users explicitly paste copied source text into authorized Claude Code/desktop chat if they want the model to use it.
+- Required validation: Rust unit tests, frontend build, Windows Portable smoke test on the user's desktop; no Release or merge without approval.

@@ -473,3 +473,12 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .web-validation { color: var(--red); font-size: 12px; }
 .web-setup input[dir="ltr"], .web-setup textarea[dir="ltr"] { direction: ltr; text-align: left; unicode-bidi: plaintext; }
 @media (max-width: 600px) { .web-setup-section { padding: 12px; } .web-grounding-toggle { gap: 9px; } }
+
+
+/* Isolated Windows browser-assisted source selection, no remote DOM access. */
+.browser-assist-card { margin-bottom: 18px; }
+.browser-assist-card .web-setup { display: grid; gap: 12px; }
+.browser-assist-card .field input, .browser-assist-card .field select { width: 100%; }
+.browser-assist-result { display: grid; gap: 9px; border: 1px solid var(--border, #7775); border-radius: 12px; padding: 14px; overflow-wrap: anywhere; }
+.browser-assist-result code { overflow-wrap: anywhere; user-select: text; }
+.browser-assist-result p { white-space: pre-wrap; line-height: 1.65; max-height: 180px; overflow-y: auto; }

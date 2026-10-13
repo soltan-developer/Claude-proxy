@@ -21,6 +21,7 @@ on:
       - v2/2.0.17-single-domain-web-settings
       - v2/2.0.18-tool-choice-provenance
       - v2/2.0.19-web-search-reliability
+      - v2/2.0.20-browser-assisted-search
       - v2/2.0.9-tool-fidelity-regressions
   workflow_dispatch:
 
