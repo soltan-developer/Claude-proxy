@@ -4120,7 +4120,7 @@ fn web_tool_definitions() -> Vec<Value> {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string", "description": "A focused web search query." },
-                        "domains": { "type": "array", "items": { "type": "string" }, "description": "Optional domain allowlist such as [\"docs.rs\", \"qwen.readthedocs.io\"]." },
+                        "domains": { "type": "array", "items": { "type": "string" }, "description": "Optional source-domain search filters (OR). Not a network security allowlist." },
                         "recency_days": { "type": "integer", "minimum": 1, "maximum": 3650, "description": "Optional recency window in days." }
                     },
                     "required": ["query"]
@@ -4459,37 +4459,96 @@ fn html_to_text(html: &str) -> String {
 }
 
 fn html_attr(fragment: &str, name: &str) -> Option<String> {
-    let marker = format!("{name}=\"");
-    let start = fragment.find(&marker)? + marker.len();
-    let end = fragment[start..].find('"')? + start;
-    Some(decode_html_entities(&fragment[start..end]))
+    // DuckDuckGo uses both single- and double-quoted attributes across HTML
+    // variants. Match full attribute names, not substrings like data-href.
+    let bytes = fragment.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        while cursor < bytes.len()
+            && !(bytes[cursor].is_ascii_alphabetic() || bytes[cursor] == b'_')
+        {
+            cursor += 1;
+        }
+        let start = cursor;
+        while cursor < bytes.len()
+            && (bytes[cursor].is_ascii_alphanumeric()
+                || matches!(bytes[cursor], b'-' | b'_' | b':'))
+        {
+            cursor += 1;
+        }
+        if start == cursor {
+            continue;
+        }
+        let attr = &fragment[start..cursor];
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || bytes[cursor] != b'=' {
+            continue;
+        }
+        cursor += 1;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() {
+            break;
+        }
+        let quote = bytes[cursor];
+        let quoted = quote == b'"' || quote == b'\'';
+        if quoted {
+            cursor += 1;
+        }
+        let value_start = cursor;
+        while cursor < bytes.len()
+            && if quoted {
+                bytes[cursor] != quote
+            } else {
+                !bytes[cursor].is_ascii_whitespace() && bytes[cursor] != b'>'
+            }
+        {
+            cursor += 1;
+        }
+        let value = &fragment[value_start..cursor];
+        if quoted && cursor < bytes.len() {
+            cursor += 1;
+        }
+        if attr.eq_ignore_ascii_case(name) {
+            return Some(decode_html_entities(value));
+        }
+    }
+    None
 }
 
 fn extract_search_results(html: &str, base_url: &Url) -> Vec<Value> {
     let mut results = Vec::new();
     let mut cursor = 0usize;
     while results.len() < 8 {
-        let Some(marker) = html[cursor..].find("result__a") else {
+        let Some(relative_start) = html[cursor..].find("<a") else {
             break;
         };
-        let marker_start = cursor + marker;
-        let Some(anchor_start) = html[..marker_start].rfind("<a") else {
-            break;
-        };
+        let anchor_start = cursor + relative_start;
         let Some(anchor_end_rel) = html[anchor_start..].find('>') else {
             break;
         };
         let anchor_end = anchor_start + anchor_end_rel;
-        let Some(close_rel) = html[anchor_end + 1..].find("</a>") else {
-            break;
+        cursor = anchor_end + 1;
+        let opening = &html[anchor_start..=anchor_end];
+        let is_result = html_attr(opening, "class").is_some_and(|classes| {
+            classes.split_ascii_whitespace().any(|class| class == "result__a")
+        });
+        if !is_result {
+            continue;
+        }
+        let Some(close_rel) = html[cursor..].find("</a>") else {
+            continue;
         };
-        let close = anchor_end + 1 + close_rel;
-        let Some(raw_href) = html_attr(&html[anchor_start..=anchor_end], "href") else {
+        let close = cursor + close_rel;
+        let Some(raw_href) = html_attr(opening, "href") else {
             cursor = close + 4;
             continue;
         };
         let href = base_url.join(&raw_href).ok().and_then(|url| {
-            if url.path().contains("/l/") {
+            if url.path().starts_with("/l/") {
                 url.query_pairs()
                     .find(|(key, _)| key == "uddg")
                     .map(|(_, value)| value.into_owned())
@@ -4506,18 +4565,87 @@ fn extract_search_results(html: &str, base_url: &Url) -> Vec<Value> {
             continue;
         }
         let title = html_to_text(&html[anchor_end + 1..close]);
-        let snippet_start = html[close + 4..]
+        if title.trim().is_empty() {
+            cursor = close + 4;
+            continue;
+        }
+        // Snippets are optional, metadata only, and never a verified source.
+        // Do not accidentally attach a snippet from the next search result.
+        let next = &html[close + 4..];
+        let limited = &next[..next.len().min(2000)];
+        let snippet = limited
             .find("result__snippet")
-            .map(|offset| close + 4 + offset);
-        let snippet = snippet_start
-            .and_then(|start| html[start..].find('>').map(|offset| start + offset + 1))
-            .and_then(|start| html[start..].find('<').map(|offset| start + offset))
-            .map(|end| html_to_text(&html[snippet_start.unwrap_or(end)..end]))
+            .and_then(|start| {
+                let before = &limited[..start];
+                if before.contains("result__a") {
+                    None
+                } else {
+                    limited[start..]
+                        .find('>')
+                        .map(|end| start + end + 1)
+                }
+            })
+            .and_then(|start| {
+                limited[start..]
+                    .find("</")
+                    .map(|end| html_to_text(&limited[start..start + end]))
+            })
             .unwrap_or_default();
         results.push(json!({ "title": title, "url": href, "snippet": snippet }));
         cursor = close + 4;
     }
     results
+}
+
+fn search_empty_response_reason(html: &str) -> (&'static str, &'static str) {
+    let lower = html.to_ascii_lowercase();
+    if lower.contains("captcha")
+        || lower.contains("anomaly")
+        || lower.contains("bots use duckduckgo")
+    {
+        (
+            "search_provider_challenge",
+            "Search was denied by the selected provider's challenge page; no results are verified. Check provider permissions and proxy settings.",
+        )
+    } else if lower.contains("no results found") || lower.contains("no results.") {
+        (
+            "search_no_results",
+            "The selected search service reported no results for this query.",
+        )
+    } else {
+        (
+            "search_html_unrecognized",
+            "The selected search service returned HTML without recognizable result links. Check the configured search endpoint, proxy, or search provider response.",
+        )
+    }
+}
+
+fn search_query_with_domains(query: &str, domains: Option<&Value>) -> String {
+    let Some(domains) = domains.and_then(Value::as_array) else {
+        return query.to_string();
+    };
+    let hosts = normalize_web_preferred_domains(
+        domains
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+    );
+    let sites = hosts
+        .iter()
+        .take(8)
+        .map(|host| format!("site:{host}"))
+        .collect::<Vec<_>>();
+    if sites.is_empty() {
+        return query.to_string();
+    }
+    if sites.len() == 1 {
+        format!("{query} {}", sites[0])
+    } else {
+        // Multiple "site:" terms joined by spaces are an intersection
+        // (often unsatisfiable), not an OR domain filter.
+        format!("{query} ({})", sites.join(" OR "))
+    }
 }
 
 async fn read_bounded_web_text(mut response: reqwest::Response) -> Result<String, String> {
@@ -4548,21 +4676,7 @@ async fn web_search(config: &AppConfig, arguments: &Value) -> String {
     if query.chars().count() > 500 {
         return json!({ "error": "The search query is too long." }).to_string();
     }
-    let mut query = query.to_string();
-    if let Some(domains) = arguments.get("domains").and_then(Value::as_array) {
-        let sites = domains
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::trim)
-            .filter(|domain| !domain.is_empty() && !domain.contains(char::is_whitespace))
-            .take(8)
-            .map(|domain| format!("site:{domain}"))
-            .collect::<Vec<_>>();
-        if !sites.is_empty() {
-            query.push(' ');
-            query.push_str(&sites.join(" "));
-        }
-    }
+    let query = search_query_with_domains(query, arguments.get("domains"));
     let mut endpoint = match Url::parse(&config.web_search_url) {
         Ok(url) => url,
         Err(error) => {
@@ -4601,7 +4715,8 @@ async fn web_search(config: &AppConfig, arguments: &Value) -> String {
     }
     let results = extract_search_results(&body, &endpoint);
     if results.is_empty() {
-        return json!({ "error": "Search returned no verifiable results. Do not guess or fabricate sources.", "query": query }).to_string();
+        let (error_code, error) = search_empty_response_reason(&body);
+        return json!({ "error_code": error_code, "error": error, "query": query }).to_string();
     }
     let retrieved_at_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
