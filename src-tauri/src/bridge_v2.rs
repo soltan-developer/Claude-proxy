@@ -4550,7 +4550,9 @@ fn extract_search_results(html: &str, base_url: &Url) -> Vec<Value> {
         cursor = anchor_end + 1;
         let opening = &html[anchor_start..=anchor_end];
         let is_result = html_attr(opening, "class").is_some_and(|classes| {
-            classes.split_ascii_whitespace().any(|class| class == "result__a")
+            classes
+                .split_ascii_whitespace()
+                .any(|class| class == "result__a")
         });
         if !is_result {
             continue;
@@ -4597,9 +4599,7 @@ fn extract_search_results(html: &str, base_url: &Url) -> Vec<Value> {
                 if before.contains("result__a") {
                     None
                 } else {
-                    limited[start..]
-                        .find('>')
-                        .map(|end| start + end + 1)
+                    limited[start..].find('>').map(|end| start + end + 1)
                 }
             })
             .and_then(|start| {
@@ -7596,8 +7596,14 @@ mod tests {
 
     #[test]
     fn search_reasons_and_domain_filters_do_not_fake_results() {
-        let domains = json!(["github.com", "raw.githubusercontent.com", "http://bad",
-            "localhost", "github.com", "bad.example/evil"]);
+        let domains = json!([
+            "github.com",
+            "raw.githubusercontent.com",
+            "http://bad",
+            "localhost",
+            "github.com",
+            "bad.example/evil"
+        ]);
         let query = search_query_with_domains("claude code", Some(&domains));
         assert!(query.contains("(site:github.com OR site:raw.githubusercontent.com)"));
         assert!(!query.contains("bad.example"));
