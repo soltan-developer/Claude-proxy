@@ -4067,39 +4067,42 @@ async fn collect_client_web_evidence(config: &AppConfig, task: &ClientGrounding)
             if filtered.is_empty() {
                 return (false, "Search failed or returned no sources from approved public hostnames. Do not invent results.".into());
             }
-            // An HTML search result is only a title/snippet. Verify one
-            // permitted page independently before marking grounding as verified.
-            let Some(source_url) = filtered
-                .first()
-                .and_then(|item| item.get("url"))
-                .and_then(Value::as_str)
-            else {
-                return (false, "Search results had no verifiable source URL.".into());
-            };
-            let page = web_fetch_scoped(
-                config,
-                &json!({"url": source_url, "max_chars": 3500}),
-                Some(&config.client_web_allowed_domains),
-            )
-            .await;
-            let page_json = serde_json::from_str::<Value>(&page).unwrap_or(Value::Null);
-            if page_json.get("error").is_some()
-                || !page_json
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .is_some_and(|content| !content.trim().is_empty())
-            {
-                return (false, "Search found titles/snippets, but the authorized source page was not verified. No page content was retrieved.".into());
+            // Search snippets are not source evidence. Verify a small number
+            // of approved destinations; an inaccessible first hit must not
+            // suppress another approved, readable result.
+            for candidate in filtered.iter().take(3) {
+                let Some(source_url) = candidate.get("url").and_then(Value::as_str) else {
+                    continue;
+                };
+                let page = web_fetch_scoped(
+                    config,
+                    &json!({"url": source_url, "max_chars": 3500}),
+                    Some(&config.client_web_allowed_domains),
+                )
+                .await;
+                let page_json = serde_json::from_str::<Value>(&page).unwrap_or(Value::Null);
+                if page_json.get("error").is_some()
+                    || !page_json
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|content| !content.trim().is_empty())
+                {
+                    continue;
+                }
+                return (
+                    true,
+                    json!({
+                        "evidence_kind": "fetched_public_page",
+                        "page": page_json,
+                        "search_results_metadata_only": filtered,
+                        "retrieved_at_unix": parsed.get("retrieved_at_unix")
+                    })
+                    .to_string(),
+                );
             }
             (
-                true,
-                json!({
-                    "evidence_kind": "fetched_public_page",
-                    "page": page_json,
-                    "search_results_metadata_only": filtered,
-                    "retrieved_at_unix": parsed.get("retrieved_at_unix")
-                })
-                .to_string(),
+                false,
+                "Search returned approved results, but none of the first three approved source pages could be read. Snippets are not verified page content.".into(),
             )
         }
     }
@@ -4572,7 +4575,8 @@ fn extract_search_results(html: &str, base_url: &Url) -> Vec<Value> {
         // Snippets are optional, metadata only, and never a verified source.
         // Do not accidentally attach a snippet from the next search result.
         let next = &html[close + 4..];
-        let limited = &next[..next.len().min(2000)];
+        let limited_text: String = next.chars().take(2000).collect();
+        let limited = limited_text.as_str();
         let snippet = limited
             .find("result__snippet")
             .and_then(|start| {
@@ -7541,6 +7545,67 @@ mod tests {
         let error = anthropic_to_openai(&invalid, &fable_route()).unwrap_err();
         assert!(error.contains("COWORK_UNSUPPORTED_MESSAGE_ROLE"));
         assert!(error.contains("message_index=1"));
+    }
+
+    #[test]
+    fn html_search_results_accept_quoted_attributes_and_reject_untrusted_links() {
+        let base = Url::parse("https://html.duckduckgo.com/html/").unwrap();
+        let html = concat!(
+            "<div><a class='result__a' href='//duckduckgo.com/l/?uddg=https%3A%2F%2Fgithub.com%2Fanthropics%2Fclaude-code'>",
+            "<b>Claude</b> Code</a><span class='result__snippet'>Official repository</span></div>",
+            "<div><a href=\"https://example.org/docs\" class=\"result__a other\">Docs</a></div>",
+            "<div><a class='result__a' href='http://127.0.0.1/secret'>Internal</a></div>",
+            "<div><a class='result__a' href='javascript:alert(1)'>Script</a></div>",
+            "<div><a class='nav' href='https://example.org/ignored'>Navigation</a></div>"
+        );
+        let found = extract_search_results(html, &base);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0]["url"], "https://github.com/anthropics/claude-code");
+        assert_eq!(found[0]["title"], "Claude Code");
+        assert_eq!(found[0]["snippet"], "Official repository");
+        assert_eq!(found[1]["url"], "https://example.org/docs");
+        assert!(html_attr("<a data-href='evil' href = 'good'>", "href")
+            .is_some_and(|value| value == "good"));
+        assert!(html_attr("<a data-href='evil'>", "href").is_none());
+    }
+
+    #[test]
+    fn html_search_results_handle_persian_utf8_and_class_order() {
+        let base = Url::parse("https://html.duckduckgo.com/html/").unwrap();
+        let html = format!(
+            "<div><a href='https://example.org/guide' class='title result__a'>آموزش فارسی</a>{}<span class='result__snippet'>توضیح</span></div>",
+            "آ".repeat(1800)
+        );
+        let results = extract_search_results(&html, &base);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["title"], "آموزش فارسی");
+    }
+
+    #[test]
+    fn search_reasons_and_domain_filters_do_not_fake_results() {
+        let domains = json!(["github.com", "raw.githubusercontent.com", "http://bad",
+            "localhost", "github.com", "bad.example/evil"]);
+        let query = search_query_with_domains("claude code", Some(&domains));
+        assert!(query.contains("(site:github.com OR site:raw.githubusercontent.com)"));
+        assert!(!query.contains("bad.example"));
+        assert!(!query.contains("localhost"));
+        assert!(!query.contains("site:github.com site:raw"));
+        assert_eq!(
+            search_query_with_domains("test", Some(&json!(["github.com"]))),
+            "test site:github.com"
+        );
+        assert_eq!(
+            search_empty_response_reason("<html>CAPTCHA challenge</html>").0,
+            "search_provider_challenge"
+        );
+        assert_eq!(
+            search_empty_response_reason("<html><p>No results found</p></html>").0,
+            "search_no_results"
+        );
+        assert_eq!(
+            search_empty_response_reason("<html>unexpected layout</html>").0,
+            "search_html_unrecognized"
+        );
     }
 
     #[test]
