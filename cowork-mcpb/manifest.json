@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "claude-proxy-web",
   "display_name": "Claude Proxy — Local Web Tools",
-  "version": "2.0.18",
+  "version": "2.0.19",
   "description": "Optional, read-only local web search and fetch tools backed by Claude Proxy. Only for client sessions and organizations that authorize local MCP tools and requested destinations.",
   "author": { "name": "Salmanzadeh" },
   "server": {
