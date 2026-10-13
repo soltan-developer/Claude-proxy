@@ -2109,14 +2109,20 @@ async fn mcp_post(
             } else {
                 web_fetch(&config, &args).await
             };
-            let is_error = serde_json::from_str::<Value>(&text)
-                .ok()
-                .is_none_or(|value| value.get("error").is_some());
+            let response_json = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
+            let is_error = response_json.is_null() || response_json.get("error").is_some();
+            let failure_category = match response_json.get("error_code").and_then(Value::as_str) {
+                Some("search_provider_challenge") => "search_provider_challenge",
+                Some("search_no_results") => "search_no_results",
+                Some("search_html_unrecognized") => "search_html_unrecognized",
+                _ if is_error => "network_or_provider_error",
+                _ => "none",
+            };
             state.observability.log(
                 if is_error { "warning" } else { "info" },
                 "mcp web tool",
                 &format!(
-                    "{}: {} ({} ms).",
+                    "{}: {}; failure_category={failure_category} ({} ms).",
                     if name == "claude_proxy_web_search" {
                         "search"
                     } else {
@@ -4045,7 +4051,14 @@ async fn collect_client_web_evidence(config: &AppConfig, task: &ClientGrounding)
             }
         }
         ClientGrounding::Search(query) => {
-            let result = web_search(config, &json!({"query": query})).await;
+            let result = web_search(
+                config,
+                &json!({
+                    "query": query,
+                    "domains": config.client_web_allowed_domains
+                }),
+            )
+            .await;
             let parsed = serde_json::from_str::<Value>(&result).unwrap_or(Value::Null);
             let filtered = parsed
                 .get("results")
@@ -4067,39 +4080,42 @@ async fn collect_client_web_evidence(config: &AppConfig, task: &ClientGrounding)
             if filtered.is_empty() {
                 return (false, "Search failed or returned no sources from approved public hostnames. Do not invent results.".into());
             }
-            // An HTML search result is only a title/snippet. Verify one
-            // permitted page independently before marking grounding as verified.
-            let Some(source_url) = filtered
-                .first()
-                .and_then(|item| item.get("url"))
-                .and_then(Value::as_str)
-            else {
-                return (false, "Search results had no verifiable source URL.".into());
-            };
-            let page = web_fetch_scoped(
-                config,
-                &json!({"url": source_url, "max_chars": 3500}),
-                Some(&config.client_web_allowed_domains),
-            )
-            .await;
-            let page_json = serde_json::from_str::<Value>(&page).unwrap_or(Value::Null);
-            if page_json.get("error").is_some()
-                || !page_json
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .is_some_and(|content| !content.trim().is_empty())
-            {
-                return (false, "Search found titles/snippets, but the authorized source page was not verified. No page content was retrieved.".into());
+            // Search snippets are not source evidence. Verify a small number
+            // of approved destinations; an inaccessible first hit must not
+            // suppress another approved, readable result.
+            for candidate in filtered.iter().take(3) {
+                let Some(source_url) = candidate.get("url").and_then(Value::as_str) else {
+                    continue;
+                };
+                let page = web_fetch_scoped(
+                    config,
+                    &json!({"url": source_url, "max_chars": 3500}),
+                    Some(&config.client_web_allowed_domains),
+                )
+                .await;
+                let page_json = serde_json::from_str::<Value>(&page).unwrap_or(Value::Null);
+                if page_json.get("error").is_some()
+                    || !page_json
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|content| !content.trim().is_empty())
+                {
+                    continue;
+                }
+                return (
+                    true,
+                    json!({
+                        "evidence_kind": "fetched_public_page",
+                        "page": page_json,
+                        "search_results_metadata_only": filtered,
+                        "retrieved_at_unix": parsed.get("retrieved_at_unix")
+                    })
+                    .to_string(),
+                );
             }
             (
-                true,
-                json!({
-                    "evidence_kind": "fetched_public_page",
-                    "page": page_json,
-                    "search_results_metadata_only": filtered,
-                    "retrieved_at_unix": parsed.get("retrieved_at_unix")
-                })
-                .to_string(),
+                false,
+                "Search returned approved results, but none of the first three approved source pages could be read. Snippets are not verified page content.".into(),
             )
         }
     }
@@ -4120,7 +4136,7 @@ fn web_tool_definitions() -> Vec<Value> {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string", "description": "A focused web search query." },
-                        "domains": { "type": "array", "items": { "type": "string" }, "description": "Optional domain allowlist such as [\"docs.rs\", \"qwen.readthedocs.io\"]." },
+                        "domains": { "type": "array", "items": { "type": "string" }, "description": "Optional source-domain search filters (OR). Not a network security allowlist." },
                         "recency_days": { "type": "integer", "minimum": 1, "maximum": 3650, "description": "Optional recency window in days." }
                     },
                     "required": ["query"]
@@ -4459,37 +4475,98 @@ fn html_to_text(html: &str) -> String {
 }
 
 fn html_attr(fragment: &str, name: &str) -> Option<String> {
-    let marker = format!("{name}=\"");
-    let start = fragment.find(&marker)? + marker.len();
-    let end = fragment[start..].find('"')? + start;
-    Some(decode_html_entities(&fragment[start..end]))
+    // DuckDuckGo uses both single- and double-quoted attributes across HTML
+    // variants. Match full attribute names, not substrings like data-href.
+    let bytes = fragment.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        while cursor < bytes.len()
+            && !(bytes[cursor].is_ascii_alphabetic() || bytes[cursor] == b'_')
+        {
+            cursor += 1;
+        }
+        let start = cursor;
+        while cursor < bytes.len()
+            && (bytes[cursor].is_ascii_alphanumeric()
+                || matches!(bytes[cursor], b'-' | b'_' | b':'))
+        {
+            cursor += 1;
+        }
+        if start == cursor {
+            continue;
+        }
+        let attr = &fragment[start..cursor];
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || bytes[cursor] != b'=' {
+            continue;
+        }
+        cursor += 1;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() {
+            break;
+        }
+        let quote = bytes[cursor];
+        let quoted = quote == b'"' || quote == b'\'';
+        if quoted {
+            cursor += 1;
+        }
+        let value_start = cursor;
+        while cursor < bytes.len()
+            && if quoted {
+                bytes[cursor] != quote
+            } else {
+                !bytes[cursor].is_ascii_whitespace() && bytes[cursor] != b'>'
+            }
+        {
+            cursor += 1;
+        }
+        let value = &fragment[value_start..cursor];
+        if quoted && cursor < bytes.len() {
+            cursor += 1;
+        }
+        if attr.eq_ignore_ascii_case(name) {
+            return Some(decode_html_entities(value));
+        }
+    }
+    None
 }
 
 fn extract_search_results(html: &str, base_url: &Url) -> Vec<Value> {
     let mut results = Vec::new();
     let mut cursor = 0usize;
     while results.len() < 8 {
-        let Some(marker) = html[cursor..].find("result__a") else {
+        let Some(relative_start) = html[cursor..].find("<a") else {
             break;
         };
-        let marker_start = cursor + marker;
-        let Some(anchor_start) = html[..marker_start].rfind("<a") else {
-            break;
-        };
+        let anchor_start = cursor + relative_start;
         let Some(anchor_end_rel) = html[anchor_start..].find('>') else {
             break;
         };
         let anchor_end = anchor_start + anchor_end_rel;
-        let Some(close_rel) = html[anchor_end + 1..].find("</a>") else {
-            break;
+        cursor = anchor_end + 1;
+        let opening = &html[anchor_start..=anchor_end];
+        let is_result = html_attr(opening, "class").is_some_and(|classes| {
+            classes
+                .split_ascii_whitespace()
+                .any(|class| class == "result__a")
+        });
+        if !is_result {
+            continue;
+        }
+        let Some(close_rel) = html[cursor..].find("</a>") else {
+            continue;
         };
-        let close = anchor_end + 1 + close_rel;
-        let Some(raw_href) = html_attr(&html[anchor_start..=anchor_end], "href") else {
+        let close = cursor + close_rel;
+        let Some(raw_href) = html_attr(opening, "href") else {
             cursor = close + 4;
             continue;
         };
         let href = base_url.join(&raw_href).ok().and_then(|url| {
-            if url.path().contains("/l/") {
+            if url.path().starts_with("/l/") {
                 url.query_pairs()
                     .find(|(key, _)| key == "uddg")
                     .map(|(_, value)| value.into_owned())
@@ -4506,18 +4583,86 @@ fn extract_search_results(html: &str, base_url: &Url) -> Vec<Value> {
             continue;
         }
         let title = html_to_text(&html[anchor_end + 1..close]);
-        let snippet_start = html[close + 4..]
+        if title.trim().is_empty() {
+            cursor = close + 4;
+            continue;
+        }
+        // Snippets are optional, metadata only, and never a verified source.
+        // Do not accidentally attach a snippet from the next search result.
+        let next = &html[close + 4..];
+        let limited_text: String = next.chars().take(2000).collect();
+        let limited = limited_text.as_str();
+        let snippet = limited
             .find("result__snippet")
-            .map(|offset| close + 4 + offset);
-        let snippet = snippet_start
-            .and_then(|start| html[start..].find('>').map(|offset| start + offset + 1))
-            .and_then(|start| html[start..].find('<').map(|offset| start + offset))
-            .map(|end| html_to_text(&html[snippet_start.unwrap_or(end)..end]))
+            .and_then(|start| {
+                let before = &limited[..start];
+                if before.contains("result__a") {
+                    None
+                } else {
+                    limited[start..].find('>').map(|end| start + end + 1)
+                }
+            })
+            .and_then(|start| {
+                limited[start..]
+                    .find("</")
+                    .map(|end| html_to_text(&limited[start..start + end]))
+            })
             .unwrap_or_default();
         results.push(json!({ "title": title, "url": href, "snippet": snippet }));
         cursor = close + 4;
     }
     results
+}
+
+fn search_empty_response_reason(html: &str) -> (&'static str, &'static str) {
+    let lower = html.to_ascii_lowercase();
+    if lower.contains("captcha")
+        || lower.contains("anomaly")
+        || lower.contains("bots use duckduckgo")
+    {
+        (
+            "search_provider_challenge",
+            "Search was denied by the selected provider's challenge page; no results are verified. Check provider permissions and proxy settings.",
+        )
+    } else if lower.contains("no results found") || lower.contains("no results.") {
+        (
+            "search_no_results",
+            "The selected search service reported no results for this query.",
+        )
+    } else {
+        (
+            "search_html_unrecognized",
+            "The selected search service returned HTML without recognizable result links. Check the configured search endpoint, proxy, or search provider response.",
+        )
+    }
+}
+
+fn search_query_with_domains(query: &str, domains: Option<&Value>) -> String {
+    let Some(domains) = domains.and_then(Value::as_array) else {
+        return query.to_string();
+    };
+    let hosts = normalize_web_preferred_domains(
+        domains
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+    );
+    let sites = hosts
+        .iter()
+        .take(8)
+        .map(|host| format!("site:{host}"))
+        .collect::<Vec<_>>();
+    if sites.is_empty() {
+        return query.to_string();
+    }
+    if sites.len() == 1 {
+        format!("{query} {}", sites[0])
+    } else {
+        // Multiple "site:" terms joined by spaces are an intersection
+        // (often unsatisfiable), not an OR domain filter.
+        format!("{query} ({})", sites.join(" OR "))
+    }
 }
 
 async fn read_bounded_web_text(mut response: reqwest::Response) -> Result<String, String> {
@@ -4548,21 +4693,7 @@ async fn web_search(config: &AppConfig, arguments: &Value) -> String {
     if query.chars().count() > 500 {
         return json!({ "error": "The search query is too long." }).to_string();
     }
-    let mut query = query.to_string();
-    if let Some(domains) = arguments.get("domains").and_then(Value::as_array) {
-        let sites = domains
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::trim)
-            .filter(|domain| !domain.is_empty() && !domain.contains(char::is_whitespace))
-            .take(8)
-            .map(|domain| format!("site:{domain}"))
-            .collect::<Vec<_>>();
-        if !sites.is_empty() {
-            query.push(' ');
-            query.push_str(&sites.join(" "));
-        }
-    }
+    let query = search_query_with_domains(query, arguments.get("domains"));
     let mut endpoint = match Url::parse(&config.web_search_url) {
         Ok(url) => url,
         Err(error) => {
@@ -4601,7 +4732,8 @@ async fn web_search(config: &AppConfig, arguments: &Value) -> String {
     }
     let results = extract_search_results(&body, &endpoint);
     if results.is_empty() {
-        return json!({ "error": "Search returned no verifiable results. Do not guess or fabricate sources.", "query": query }).to_string();
+        let (error_code, error) = search_empty_response_reason(&body);
+        return json!({ "error_code": error_code, "error": error, "query": query }).to_string();
     }
     let retrieved_at_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -7426,6 +7558,73 @@ mod tests {
         let error = anthropic_to_openai(&invalid, &fable_route()).unwrap_err();
         assert!(error.contains("COWORK_UNSUPPORTED_MESSAGE_ROLE"));
         assert!(error.contains("message_index=1"));
+    }
+
+    #[test]
+    fn html_search_results_accept_quoted_attributes_and_reject_untrusted_links() {
+        let base = Url::parse("https://html.duckduckgo.com/html/").unwrap();
+        let html = concat!(
+            "<div><a class='result__a' href='//duckduckgo.com/l/?uddg=https%3A%2F%2Fgithub.com%2Fanthropics%2Fclaude-code'>",
+            "<b>Claude</b> Code</a><span class='result__snippet'>Official repository</span></div>",
+            "<div><a href=\"https://example.org/docs\" class=\"result__a other\">Docs</a></div>",
+            "<div><a class='result__a' href='http://127.0.0.1/secret'>Internal</a></div>",
+            "<div><a class='result__a' href='javascript:alert(1)'>Script</a></div>",
+            "<div><a class='nav' href='https://example.org/ignored'>Navigation</a></div>"
+        );
+        let found = extract_search_results(html, &base);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0]["url"], "https://github.com/anthropics/claude-code");
+        assert_eq!(found[0]["title"], "Claude Code");
+        assert_eq!(found[0]["snippet"], "Official repository");
+        assert_eq!(found[1]["url"], "https://example.org/docs");
+        assert!(html_attr("<a data-href='evil' href = 'good'>", "href")
+            .is_some_and(|value| value == "good"));
+        assert!(html_attr("<a data-href='evil'>", "href").is_none());
+    }
+
+    #[test]
+    fn html_search_results_handle_persian_utf8_and_class_order() {
+        let base = Url::parse("https://html.duckduckgo.com/html/").unwrap();
+        let html = format!(
+            "<div><a href='https://example.org/guide' class='title result__a'>آموزش فارسی</a>{}<span class='result__snippet'>توضیح</span></div>",
+            "آ".repeat(1800)
+        );
+        let results = extract_search_results(&html, &base);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["title"], "آموزش فارسی");
+    }
+
+    #[test]
+    fn search_reasons_and_domain_filters_do_not_fake_results() {
+        let domains = json!([
+            "github.com",
+            "raw.githubusercontent.com",
+            "http://bad",
+            "localhost",
+            "github.com",
+            "bad.example/evil"
+        ]);
+        let query = search_query_with_domains("claude code", Some(&domains));
+        assert!(query.contains("(site:github.com OR site:raw.githubusercontent.com)"));
+        assert!(!query.contains("bad.example"));
+        assert!(!query.contains("localhost"));
+        assert!(!query.contains("site:github.com site:raw"));
+        assert_eq!(
+            search_query_with_domains("test", Some(&json!(["github.com"]))),
+            "test site:github.com"
+        );
+        assert_eq!(
+            search_empty_response_reason("<html>CAPTCHA challenge</html>").0,
+            "search_provider_challenge"
+        );
+        assert_eq!(
+            search_empty_response_reason("<html><p>No results found</p></html>").0,
+            "search_no_results"
+        );
+        assert_eq!(
+            search_empty_response_reason("<html>unexpected layout</html>").0,
+            "search_html_unrecognized"
+        );
     }
 
     #[test]

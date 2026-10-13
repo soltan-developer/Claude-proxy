@@ -14,6 +14,7 @@ on:
       - 'src/**'
       - 'package.json'
       - 'README.md'
+      - 'docs/ci/**'
       - 'src-tauri/Cargo.toml'
       - 'src-tauri/Cargo.lock'
       - 'src-tauri/tauri.conf.json'
@@ -24,6 +25,15 @@ on:
       - 'package-lock.json'
       - '.github/workflows/verify-v2.yml'
   workflow_dispatch:
+    inputs:
+      linux_runner:
+        description: 'Frontend runner (self-hosted is opt-in; never auto-run public PRs on your private server)'
+        required: true
+        type: choice
+        default: github-hosted
+        options:
+          - github-hosted
+          - self-hosted
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -60,7 +70,10 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
   v2-frontend:
-    runs-on: ubuntu-latest
+    # Untrusted public pull requests always use GitHub-hosted runners.
+    # Owner-initiated manual runs may explicitly opt into a registered Linux runner.
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.linux_runner != 'self-hosted' || github.actor == github.repository_owner }}
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.linux_runner == 'self-hosted' && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
